@@ -25,6 +25,8 @@ enum class NCAContentType : u8;
 enum class TitleType : u8;
 
 struct ContentRecord;
+struct MetaRecord;
+class RegisteredCache;
 
 using NcaID = std::array<u8, 0x10>;
 using ContentProviderParsingFunction = std::function<VirtualFile(const VirtualFile&, const NcaID&)>;
@@ -32,6 +34,7 @@ using VfsCopyFunction = std::function<bool(const VirtualFile&, const VirtualFile
 
 enum class InstallResult {
     Success,
+    OverwriteExisting,
     ErrorAlreadyExists,
     ErrorCopyFailed,
     ErrorMetaFailed,
@@ -64,18 +67,18 @@ public:
     virtual void Refresh() = 0;
 
     virtual bool HasEntry(u64 title_id, ContentRecordType type) const = 0;
-    virtual bool HasEntry(ContentProviderEntry entry) const;
+    bool HasEntry(ContentProviderEntry entry) const;
 
     virtual std::optional<u32> GetEntryVersion(u64 title_id) const = 0;
 
     virtual VirtualFile GetEntryUnparsed(u64 title_id, ContentRecordType type) const = 0;
-    virtual VirtualFile GetEntryUnparsed(ContentProviderEntry entry) const;
+    VirtualFile GetEntryUnparsed(ContentProviderEntry entry) const;
 
     virtual VirtualFile GetEntryRaw(u64 title_id, ContentRecordType type) const = 0;
-    virtual VirtualFile GetEntryRaw(ContentProviderEntry entry) const;
+    VirtualFile GetEntryRaw(ContentProviderEntry entry) const;
 
     virtual std::unique_ptr<NCA> GetEntry(u64 title_id, ContentRecordType type) const = 0;
-    virtual std::unique_ptr<NCA> GetEntry(ContentProviderEntry entry) const;
+    std::unique_ptr<NCA> GetEntry(ContentProviderEntry entry) const;
 
     virtual std::vector<ContentProviderEntry> ListEntries() const;
 
@@ -86,7 +89,28 @@ public:
 
 protected:
     // A single instance of KeyManager to be used by GetEntry()
-    Core::Crypto::KeyManager keys;
+    Core::Crypto::KeyManager& keys = Core::Crypto::KeyManager::Instance();
+};
+
+class PlaceholderCache {
+public:
+    explicit PlaceholderCache(VirtualDir dir);
+
+    bool Create(const NcaID& id, u64 size) const;
+    bool Delete(const NcaID& id) const;
+    bool Exists(const NcaID& id) const;
+    bool Write(const NcaID& id, u64 offset, const std::vector<u8>& data) const;
+    bool Register(RegisteredCache* cache, const NcaID& placeholder, const NcaID& install) const;
+    bool CleanAll() const;
+    std::optional<std::array<u8, 0x10>> GetRightsID(const NcaID& id) const;
+    u64 Size(const NcaID& id) const;
+    bool SetSize(const NcaID& id, u64 new_size) const;
+    std::vector<NcaID> List() const;
+
+    static NcaID Generate();
+
+private:
+    VirtualDir dir;
 };
 
 /*
@@ -103,13 +127,15 @@ protected:
  * when 4GB splitting can be ignored.)
  */
 class RegisteredCache : public ContentProvider {
+    friend class PlaceholderCache;
+
 public:
     // Parsing function defines the conversion from raw file to NCA. If there are other steps
     // besides creating the NCA from the file (e.g. NAX0 on SD Card), that should go in a custom
     // parsing function.
-    explicit RegisteredCache(VirtualDir dir,
-                             ContentProviderParsingFunction parsing_function =
-                                 [](const VirtualFile& file, const NcaID& id) { return file; });
+    explicit RegisteredCache(
+        VirtualDir dir, ContentProviderParsingFunction parsing_function =
+                            [](const VirtualFile& file, const NcaID& id) { return file; });
     ~RegisteredCache() override;
 
     void Refresh() override;
@@ -142,6 +168,9 @@ public:
     // TODO(DarkLordZach): Author real meta-type NCAs and install those.
     InstallResult InstallEntry(const NCA& nca, TitleType type, bool overwrite_if_exists = false,
                                const VfsCopyFunction& copy = &VfsRawCopy);
+
+    // Removes an existing entry based on title id
+    bool RemoveExistingEntry(u64 title_id) const;
 
 private:
     template <typename T>

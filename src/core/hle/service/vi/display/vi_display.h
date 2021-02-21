@@ -4,11 +4,15 @@
 
 #pragma once
 
+#include <memory>
 #include <string>
 #include <vector>
 
 #include "common/common_types.h"
-#include "core/hle/kernel/writable_event.h"
+
+namespace Kernel {
+class KEvent;
+}
 
 namespace Service::NVFlinger {
 class BufferQueue;
@@ -26,7 +30,7 @@ public:
     /// @param id   The unique ID for this display.
     /// @param name The name for this display.
     ///
-    Display(u64 id, std::string name);
+    Display(u64 id, std::string name, Core::System& system);
     ~Display();
 
     Display(const Display&) = delete;
@@ -57,7 +61,7 @@ public:
     const Layer& GetLayer(std::size_t index) const;
 
     /// Gets the readable vsync event.
-    Kernel::SharedPtr<Kernel::ReadableEvent> GetVSyncEvent() const;
+    std::shared_ptr<Kernel::KReadableEvent> GetVSyncEvent() const;
 
     /// Signals the internal vsync event.
     void SignalVSyncEvent();
@@ -68,6 +72,12 @@ public:
     /// @param buffer_queue The buffer queue for the layer instance to use.
     ///
     void CreateLayer(u64 id, NVFlinger::BufferQueue& buffer_queue);
+
+    /// Closes and removes a layer from this display with the given ID.
+    ///
+    /// @param id           The ID assigned to the layer to close.
+    ///
+    void CloseLayer(u64 id);
 
     /// Attempts to find a layer with the given ID.
     ///
@@ -91,8 +101,8 @@ private:
     u64 id;
     std::string name;
 
-    std::vector<Layer> layers;
-    Kernel::EventPair vsync_event;
+    std::vector<std::shared_ptr<Layer>> layers;
+    std::shared_ptr<Kernel::KEvent> vsync_event;
 };
 
 } // namespace Service::VI

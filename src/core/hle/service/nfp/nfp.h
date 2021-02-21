@@ -6,9 +6,12 @@
 
 #include <array>
 #include <vector>
-#include "core/hle/kernel/readable_event.h"
-#include "core/hle/kernel/writable_event.h"
+
 #include "core/hle/service/service.h"
+
+namespace Kernel {
+class KEvent;
+}
 
 namespace Service::NFP {
 
@@ -16,7 +19,8 @@ class Module final {
 public:
     class Interface : public ServiceFramework<Interface> {
     public:
-        explicit Interface(std::shared_ptr<Module> module, const char* name);
+        explicit Interface(std::shared_ptr<Module> module_, Core::System& system_,
+                           const char* name);
         ~Interface() override;
 
         struct ModelInfo {
@@ -34,11 +38,11 @@ public:
 
         void CreateUserInterface(Kernel::HLERequestContext& ctx);
         bool LoadAmiibo(const std::vector<u8>& buffer);
-        const Kernel::SharedPtr<Kernel::ReadableEvent>& GetNFCEvent() const;
+        const std::shared_ptr<Kernel::KReadableEvent>& GetNFCEvent() const;
         const AmiiboFile& GetAmiiboBuffer() const;
 
     private:
-        Kernel::EventPair nfc_tag_load{};
+        std::shared_ptr<Kernel::KEvent> nfc_tag_load;
         AmiiboFile amiibo{};
 
     protected:
@@ -46,6 +50,6 @@ public:
     };
 };
 
-void InstallInterfaces(SM::ServiceManager& service_manager);
+void InstallInterfaces(SM::ServiceManager& service_manager, Core::System& system);
 
 } // namespace Service::NFP

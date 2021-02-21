@@ -5,7 +5,6 @@
 #include <algorithm>
 #include <zstd.h>
 
-#include "common/assert.h"
 #include "common/zstd_compression.h"
 
 namespace Common::Compression {

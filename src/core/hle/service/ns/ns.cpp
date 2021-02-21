@@ -3,8 +3,10 @@
 // Refer to the license.txt file included.
 
 #include "common/logging/log.h"
+#include "core/core.h"
 #include "core/file_sys/control_metadata.h"
 #include "core/file_sys/patch_manager.h"
+#include "core/file_sys/vfs.h"
 #include "core/hle/ipc_helpers.h"
 #include "core/hle/kernel/hle_ipc.h"
 #include "core/hle/service/ns/errors.h"
@@ -16,7 +18,8 @@
 
 namespace Service::NS {
 
-IAccountProxyInterface::IAccountProxyInterface() : ServiceFramework{"IAccountProxyInterface"} {
+IAccountProxyInterface::IAccountProxyInterface(Core::System& system_)
+    : ServiceFramework{system_, "IAccountProxyInterface"} {
     // clang-format off
     static const FunctionInfo functions[] = {
         {0, nullptr, "CreateUserAccount"},
@@ -28,8 +31,8 @@ IAccountProxyInterface::IAccountProxyInterface() : ServiceFramework{"IAccountPro
 
 IAccountProxyInterface::~IAccountProxyInterface() = default;
 
-IApplicationManagerInterface::IApplicationManagerInterface()
-    : ServiceFramework{"IApplicationManagerInterface"} {
+IApplicationManagerInterface::IApplicationManagerInterface(Core::System& system_)
+    : ServiceFramework{system_, "IApplicationManagerInterface"} {
     // clang-format off
     static const FunctionInfo functions[] = {
         {0, nullptr, "ListApplicationRecord"},
@@ -104,11 +107,16 @@ IApplicationManagerInterface::IApplicationManagerInterface()
         {94, nullptr, "LaunchApplication"},
         {95, nullptr, "GetApplicationLaunchInfo"},
         {96, nullptr, "AcquireApplicationLaunchInfo"},
-        {97, nullptr, "GetMainApplicationProgramIndex2"},
+        {97, nullptr, "GetMainApplicationProgramIndexByApplicationLaunchInfo"},
         {98, nullptr, "EnableApplicationAllThreadDumpOnCrash"},
+        {99, nullptr, "LaunchDevMenu"},
         {100, nullptr, "ResetToFactorySettings"},
         {101, nullptr, "ResetToFactorySettingsWithoutUserSaveData"},
         {102, nullptr, "ResetToFactorySettingsForRefurbishment"},
+        {103, nullptr, "ResetToFactorySettingsWithPlatformRegion"},
+        {104, nullptr, "ResetToFactorySettingsWithPlatformRegionAuthentication"},
+        {105, nullptr, "RequestResetToFactorySettingsSecurely"},
+        {106, nullptr, "RequestResetToFactorySettingsWithPlatformRegionAuthenticationSecurely"},
         {200, nullptr, "CalculateUserSaveDataStatistics"},
         {201, nullptr, "DeleteUserSaveDataAll"},
         {210, nullptr, "DeleteUserSystemSaveData"},
@@ -130,6 +138,8 @@ IApplicationManagerInterface::IApplicationManagerInterface()
         {404, nullptr, "InvalidateApplicationControlCache"},
         {405, nullptr, "ListApplicationControlCacheEntryInfo"},
         {406, nullptr, "GetApplicationControlProperty"},
+        {407, nullptr, "ListApplicationTitle"},
+        {408, nullptr, "ListApplicationIcon"},
         {502, nullptr, "RequestCheckGameCardRegistration"},
         {503, nullptr, "RequestGameCardRegistrationGoldPoint"},
         {504, nullptr, "RequestRegisterGameCard"},
@@ -138,6 +148,7 @@ IApplicationManagerInterface::IApplicationManagerInterface()
         {507, nullptr, "EnsureGameCardAccess"},
         {508, nullptr, "GetLastGameCardMountFailureResult"},
         {509, nullptr, "ListApplicationIdOnGameCard"},
+        {510, nullptr, "GetGameCardPlatformRegion"},
         {600, nullptr, "CountApplicationContentMeta"},
         {601, nullptr, "ListApplicationContentMetaStatus"},
         {602, nullptr, "ListAvailableAddOnContent"},
@@ -168,6 +179,9 @@ IApplicationManagerInterface::IApplicationManagerInterface()
         {910, nullptr, "HasApplicationRecord"},
         {911, nullptr, "SetPreInstalledApplication"},
         {912, nullptr, "ClearPreInstalledApplicationFlag"},
+        {913, nullptr, "ListAllApplicationRecord"},
+        {914, nullptr, "HideApplicationRecord"},
+        {915, nullptr, "ShowApplicationRecord"},
         {1000, nullptr, "RequestVerifyApplicationDeprecated"},
         {1001, nullptr, "CorruptApplicationForDebug"},
         {1002, nullptr, "RequestVerifyAddOnContentsRights"},
@@ -184,18 +198,23 @@ IApplicationManagerInterface::IApplicationManagerInterface()
         {1307, nullptr, "TryDeleteRunningApplicationContentEntities"},
         {1308, nullptr, "DeleteApplicationCompletelyForDebug"},
         {1309, nullptr, "CleanupUnavailableAddOnContents"},
+        {1310, nullptr, "RequestMoveApplicationEntity"},
+        {1311, nullptr, "EstimateSizeToMove"},
+        {1312, nullptr, "HasMovableEntity"},
         {1400, nullptr, "PrepareShutdown"},
         {1500, nullptr, "FormatSdCard"},
         {1501, nullptr, "NeedsSystemUpdateToFormatSdCard"},
         {1502, nullptr, "GetLastSdCardFormatUnexpectedResult"},
         {1504, nullptr, "InsertSdCard"},
         {1505, nullptr, "RemoveSdCard"},
+        {1506, nullptr, "GetSdCardStartupStatus"},
         {1600, nullptr, "GetSystemSeedForPseudoDeviceId"},
         {1601, nullptr, "ResetSystemSeedForPseudoDeviceId"},
         {1700, nullptr, "ListApplicationDownloadingContentMeta"},
         {1701, nullptr, "GetApplicationView"},
         {1702, nullptr, "GetApplicationDownloadTaskStatus"},
         {1703, nullptr, "GetApplicationViewDownloadErrorContext"},
+        {1704, nullptr, "GetApplicationViewWithPromotionInfo"},
         {1800, nullptr, "IsNotificationSetupCompleted"},
         {1801, nullptr, "GetLastNotificationInfoCount"},
         {1802, nullptr, "ListLastNotificationInfo"},
@@ -223,6 +242,7 @@ IApplicationManagerInterface::IApplicationManagerInterface()
         {2017, nullptr, "CreateDownloadTask"},
         {2018, nullptr, "GetApplicationDeliveryInfoHash"},
         {2050, nullptr, "GetApplicationRightsOnClient"},
+        {2051, nullptr, "InvalidateRightsIdCache"},
         {2100, nullptr, "GetApplicationTerminateResult"},
         {2101, nullptr, "GetRawApplicationTerminateResult"},
         {2150, nullptr, "CreateRightsEnvironment"},
@@ -230,12 +250,14 @@ IApplicationManagerInterface::IApplicationManagerInterface()
         {2152, nullptr, "ActivateRightsEnvironment"},
         {2153, nullptr, "DeactivateRightsEnvironment"},
         {2154, nullptr, "ForceActivateRightsContextForExit"},
+        {2155, nullptr, "UpdateRightsEnvironmentStatus"},
+        {2156, nullptr, "CreateRightsEnvironmentForMicroApplication"},
         {2160, nullptr, "AddTargetApplicationToRightsEnvironment"},
         {2161, nullptr, "SetUsersToRightsEnvironment"},
         {2170, nullptr, "GetRightsEnvironmentStatus"},
         {2171, nullptr, "GetRightsEnvironmentStatusChangedEvent"},
         {2180, nullptr, "RequestExtendRightsInRightsEnvironment"},
-        {2181, nullptr, "GetLastResultOfExtendRightsInRightsEnvironment"},
+        {2181, nullptr, "GetResultOfExtendRightsInRightsEnvironment"},
         {2182, nullptr, "SetActiveRightsContextUsingStateToRightsEnvironment"},
         {2190, nullptr, "GetRightsEnvironmentHandleForApplication"},
         {2199, nullptr, "GetRightsEnvironmentCountForDebug"},
@@ -243,6 +265,24 @@ IApplicationManagerInterface::IApplicationManagerInterface()
         {2201, nullptr, "GetInstalledApplicationCopyIdentifier"},
         {2250, nullptr, "RequestReportActiveELicence"},
         {2300, nullptr, "ListEventLog"},
+        {2350, nullptr, "PerformAutoUpdateByApplicationId"},
+        {2351, nullptr, "RequestNoDownloadRightsErrorResolution"},
+        {2352, nullptr, "RequestResolveNoDownloadRightsError"},
+        {2353, nullptr, "GetApplicationDownloadTaskInfo"},
+        {2400, nullptr, "GetPromotionInfo"},
+        {2401, nullptr, "CountPromotionInfo"},
+        {2402, nullptr, "ListPromotionInfo"},
+        {2403, nullptr, "ImportPromotionJsonForDebug"},
+        {2404, nullptr, "ClearPromotionInfoForDebug"},
+        {2500, nullptr, "ConfirmAvailableTime"},
+        {2510, nullptr, "CreateApplicationResource"},
+        {2511, nullptr, "GetApplicationResource"},
+        {2513, nullptr, "LaunchMicroApplication"},
+        {2514, nullptr, "ClearTaskOfAsyncTaskManager"},
+        {2515, nullptr, "CleanupAllPlaceHolderAndFragmentsIfNoTask"},
+        {2516, nullptr, "EnsureApplicationCertificate"},
+        {2800, nullptr, "GetApplicationIdOfPreomia"},
+        {9999, nullptr, "GetApplicationCertificate"},
     };
     // clang-format on
 
@@ -260,7 +300,8 @@ void IApplicationManagerInterface::GetApplicationControlData(Kernel::HLERequestC
 
     const auto size = ctx.GetWriteBufferSize();
 
-    const FileSys::PatchManager pm{title_id};
+    const FileSys::PatchManager pm{title_id, system.GetFileSystemController(),
+                                   system.GetContentProvider()};
     const auto control = pm.GetControlMetadata();
 
     std::vector<u8> out;
@@ -271,7 +312,7 @@ void IApplicationManagerInterface::GetApplicationControlData(Kernel::HLERequestC
                       "output buffer is too small! (actual={:016X}, expected_min=0x4000)", size);
             IPC::ResponseBuilder rb{ctx, 2};
             // TODO(DarkLordZach): Find a better error code for this.
-            rb.Push(ResultCode(-1));
+            rb.Push(RESULT_UNKNOWN);
             return;
         }
 
@@ -291,7 +332,7 @@ void IApplicationManagerInterface::GetApplicationControlData(Kernel::HLERequestC
                       0x4000 + control.second->GetSize());
             IPC::ResponseBuilder rb{ctx, 2};
             // TODO(DarkLordZach): Find a better error code for this.
-            rb.Push(ResultCode(-1));
+            rb.Push(RESULT_UNKNOWN);
             return;
         }
 
@@ -329,15 +370,21 @@ ResultVal<u8> IApplicationManagerInterface::GetApplicationDesiredLanguage(
     LOG_DEBUG(Service_NS, "called with supported_languages={:08X}", supported_languages);
 
     // Get language code from settings
-    const auto language_code = Set::GetLanguageCodeFromIndex(Settings::values.language_index);
+    const auto language_code =
+        Set::GetLanguageCodeFromIndex(Settings::values.language_index.GetValue());
 
     // Convert to application language, get priority list
     const auto application_language = ConvertToApplicationLanguage(language_code);
     if (application_language == std::nullopt) {
+        LOG_ERROR(Service_NS, "Could not convert application language! language_code={}",
+                  language_code);
         return ERR_APPLICATION_LANGUAGE_NOT_FOUND;
     }
     const auto priority_list = GetApplicationLanguagePriorityList(*application_language);
     if (!priority_list) {
+        LOG_ERROR(Service_NS,
+                  "Could not find application language priorities! application_language={}",
+                  *application_language);
         return ERR_APPLICATION_LANGUAGE_NOT_FOUND;
     }
 
@@ -349,6 +396,8 @@ ResultVal<u8> IApplicationManagerInterface::GetApplicationDesiredLanguage(
         }
     }
 
+    LOG_ERROR(Service_NS, "Could not find a valid language! supported_languages={:08X}",
+              supported_languages);
     return ERR_APPLICATION_LANGUAGE_NOT_FOUND;
 }
 
@@ -373,14 +422,15 @@ ResultVal<u64> IApplicationManagerInterface::ConvertApplicationLanguageToLanguag
     const auto language_code =
         ConvertToLanguageCode(static_cast<ApplicationLanguage>(application_language));
     if (language_code == std::nullopt) {
+        LOG_ERROR(Service_NS, "Language not found! application_language={}", application_language);
         return ERR_APPLICATION_LANGUAGE_NOT_FOUND;
     }
 
     return MakeResult(static_cast<u64>(*language_code));
 }
 
-IApplicationVersionInterface::IApplicationVersionInterface()
-    : ServiceFramework{"IApplicationVersionInterface"} {
+IApplicationVersionInterface::IApplicationVersionInterface(Core::System& system_)
+    : ServiceFramework{system_, "IApplicationVersionInterface"} {
     // clang-format off
     static const FunctionInfo functions[] = {
         {0, nullptr, "GetLaunchRequiredVersion"},
@@ -400,8 +450,8 @@ IApplicationVersionInterface::IApplicationVersionInterface()
 
 IApplicationVersionInterface::~IApplicationVersionInterface() = default;
 
-IContentManagerInterface::IContentManagerInterface()
-    : ServiceFramework{"IContentManagerInterface"} {
+IContentManagementInterface::IContentManagementInterface(Core::System& system_)
+    : ServiceFramework{system_, "IContentManagementInterface"} {
     // clang-format off
     static const FunctionInfo functions[] = {
         {11, nullptr, "CalculateApplicationOccupiedSize"},
@@ -418,9 +468,10 @@ IContentManagerInterface::IContentManagerInterface()
     RegisterHandlers(functions);
 }
 
-IContentManagerInterface::~IContentManagerInterface() = default;
+IContentManagementInterface::~IContentManagementInterface() = default;
 
-IDocumentInterface::IDocumentInterface() : ServiceFramework{"IDocumentInterface"} {
+IDocumentInterface::IDocumentInterface(Core::System& system_)
+    : ServiceFramework{system_, "IDocumentInterface"} {
     // clang-format off
     static const FunctionInfo functions[] = {
         {21, nullptr, "GetApplicationContentPath"},
@@ -434,7 +485,8 @@ IDocumentInterface::IDocumentInterface() : ServiceFramework{"IDocumentInterface"
 
 IDocumentInterface::~IDocumentInterface() = default;
 
-IDownloadTaskInterface::IDownloadTaskInterface() : ServiceFramework{"IDownloadTaskInterface"} {
+IDownloadTaskInterface::IDownloadTaskInterface(Core::System& system_)
+    : ServiceFramework{system_, "IDownloadTaskInterface"} {
     // clang-format off
     static const FunctionInfo functions[] = {
         {701, nullptr, "ClearTaskStatusList"},
@@ -454,7 +506,8 @@ IDownloadTaskInterface::IDownloadTaskInterface() : ServiceFramework{"IDownloadTa
 
 IDownloadTaskInterface::~IDownloadTaskInterface() = default;
 
-IECommerceInterface::IECommerceInterface() : ServiceFramework{"IECommerceInterface"} {
+IECommerceInterface::IECommerceInterface(Core::System& system_)
+    : ServiceFramework{system_, "IECommerceInterface"} {
     // clang-format off
     static const FunctionInfo functions[] = {
         {0, nullptr, "RequestLinkDevice"},
@@ -463,6 +516,7 @@ IECommerceInterface::IECommerceInterface() : ServiceFramework{"IECommerceInterfa
         {3, nullptr, "RequestSyncRights"},
         {4, nullptr, "RequestUnlinkDevice"},
         {5, nullptr, "RequestRevokeAllELicense"},
+        {6, nullptr, "RequestSyncRightsBasedOnAssignedELicenses"},
     };
     // clang-format on
 
@@ -471,13 +525,17 @@ IECommerceInterface::IECommerceInterface() : ServiceFramework{"IECommerceInterfa
 
 IECommerceInterface::~IECommerceInterface() = default;
 
-IFactoryResetInterface::IFactoryResetInterface::IFactoryResetInterface()
-    : ServiceFramework{"IFactoryResetInterface"} {
+IFactoryResetInterface::IFactoryResetInterface(Core::System& system_)
+    : ServiceFramework{system_, "IFactoryResetInterface"} {
     // clang-format off
         static const FunctionInfo functions[] = {
             {100, nullptr, "ResetToFactorySettings"},
             {101, nullptr, "ResetToFactorySettingsWithoutUserSaveData"},
             {102, nullptr, "ResetToFactorySettingsForRefurbishment"},
+            {103, nullptr, "ResetToFactorySettingsWithPlatformRegion"},
+            {104, nullptr, "ResetToFactorySettingsWithPlatformRegionAuthentication"},
+            {105, nullptr, "RequestResetToFactorySettingsSecurely"},
+            {106, nullptr, "RequestResetToFactorySettingsWithPlatformRegionAuthenticationSecurely"},
         };
     // clang-format on
 
@@ -486,16 +544,16 @@ IFactoryResetInterface::IFactoryResetInterface::IFactoryResetInterface()
 
 IFactoryResetInterface::~IFactoryResetInterface() = default;
 
-NS::NS(const char* name) : ServiceFramework{name} {
+NS::NS(const char* name, Core::System& system_) : ServiceFramework{system_, name} {
     // clang-format off
     static const FunctionInfo functions[] = {
         {7992, &NS::PushInterface<IECommerceInterface>, "GetECommerceInterface"},
         {7993, &NS::PushInterface<IApplicationVersionInterface>, "GetApplicationVersionInterface"},
         {7994, &NS::PushInterface<IFactoryResetInterface>, "GetFactoryResetInterface"},
         {7995, &NS::PushInterface<IAccountProxyInterface>, "GetAccountProxyInterface"},
-        {7996, &NS::PushInterface<IApplicationManagerInterface>, "GetApplicationManagerInterface"},
+        {7996, &NS::PushIApplicationManagerInterface, "GetApplicationManagerInterface"},
         {7997, &NS::PushInterface<IDownloadTaskInterface>, "GetDownloadTaskInterface"},
-        {7998, &NS::PushInterface<IContentManagerInterface>, "GetContentManagementInterface"},
+        {7998, &NS::PushInterface<IContentManagementInterface>, "GetContentManagementInterface"},
         {7999, &NS::PushInterface<IDocumentInterface>, "GetDocumentInterface"},
     };
     // clang-format on
@@ -506,12 +564,12 @@ NS::NS(const char* name) : ServiceFramework{name} {
 NS::~NS() = default;
 
 std::shared_ptr<IApplicationManagerInterface> NS::GetApplicationManagerInterface() const {
-    return GetInterface<IApplicationManagerInterface>();
+    return GetInterface<IApplicationManagerInterface>(system);
 }
 
 class NS_DEV final : public ServiceFramework<NS_DEV> {
 public:
-    explicit NS_DEV() : ServiceFramework{"ns:dev"} {
+    explicit NS_DEV(Core::System& system_) : ServiceFramework{system_, "ns:dev"} {
         // clang-format off
         static const FunctionInfo functions[] = {
             {0, nullptr, "LaunchProgram"},
@@ -522,10 +580,13 @@ public:
             {6, nullptr, "TerminateApplication"},
             {7, nullptr, "PrepareLaunchProgramFromHost"},
             {8, nullptr, "LaunchApplication"},
-            {9, nullptr, "LaunchApplicationWithStorageId"},
-            {10, nullptr, "TerminateApplication2"},
-            {11, nullptr, "GetRunningApplicationProcessId"},
+            {9, nullptr, "LaunchApplicationWithStorageIdForDevelop"},
+            {10, nullptr, "IsSystemMemoryResourceLimitBoosted"},
+            {11, nullptr, "GetRunningApplicationProcessIdForDevelop"},
             {12, nullptr, "SetCurrentApplicationRightsEnvironmentCanBeActive"},
+            {13, nullptr, "CreateApplicationResourceForDevelop"},
+            {14, nullptr, "IsPreomiaForDevelop"},
+            {15, nullptr, "GetApplicationProgramIdFromHost"},
         };
         // clang-format on
 
@@ -535,7 +596,8 @@ public:
 
 class ISystemUpdateControl final : public ServiceFramework<ISystemUpdateControl> {
 public:
-    explicit ISystemUpdateControl() : ServiceFramework{"ISystemUpdateControl"} {
+    explicit ISystemUpdateControl(Core::System& system_)
+        : ServiceFramework{system_, "ISystemUpdateControl"} {
         // clang-format off
         static const FunctionInfo functions[] = {
             {0, nullptr, "HasDownloaded"},
@@ -570,7 +632,7 @@ public:
 
 class NS_SU final : public ServiceFramework<NS_SU> {
 public:
-    explicit NS_SU() : ServiceFramework{"ns:su"} {
+    explicit NS_SU(Core::System& system_) : ServiceFramework{system_, "ns:su"} {
         // clang-format off
         static const FunctionInfo functions[] = {
             {0, nullptr, "GetBackgroundNetworkUpdateState"},
@@ -583,6 +645,10 @@ public:
             {9, nullptr, "GetSystemUpdateNotificationEventForContentDelivery"},
             {10, nullptr, "NotifySystemUpdateForContentDelivery"},
             {11, nullptr, "PrepareShutdown"},
+            {12, nullptr, "Unknown12"},
+            {13, nullptr, "Unknown13"},
+            {14, nullptr, "Unknown14"},
+            {15, nullptr, "Unknown15"},
             {16, nullptr, "DestroySystemUpdateTask"},
             {17, nullptr, "RequestSendSystemUpdate"},
             {18, nullptr, "GetSendSystemUpdateProgress"},
@@ -598,16 +664,16 @@ private:
 
         IPC::ResponseBuilder rb{ctx, 2, 0, 1};
         rb.Push(RESULT_SUCCESS);
-        rb.PushIpcInterface<ISystemUpdateControl>();
+        rb.PushIpcInterface<ISystemUpdateControl>(system);
     }
 };
 
 class NS_VM final : public ServiceFramework<NS_VM> {
 public:
-    explicit NS_VM() : ServiceFramework{"ns:vm"} {
+    explicit NS_VM(Core::System& system_) : ServiceFramework{system_, "ns:vm"} {
         // clang-format off
         static const FunctionInfo functions[] = {
-            {1200, nullptr, "NeedsUpdateVulnerability"},
+            {1200, &NS_VM::NeedsUpdateVulnerability, "NeedsUpdateVulnerability"},
             {1201, nullptr, "UpdateSafeSystemVersionForDebug"},
             {1202, nullptr, "GetSafeSystemVersion"},
         };
@@ -615,20 +681,30 @@ public:
 
         RegisterHandlers(functions);
     }
+
+private:
+    void NeedsUpdateVulnerability(Kernel::HLERequestContext& ctx) {
+        LOG_WARNING(Service_NS, "(STUBBED) called");
+
+        IPC::ResponseBuilder rb{ctx, 3};
+        rb.Push(RESULT_SUCCESS);
+        rb.Push(false);
+    }
 };
 
-void InstallInterfaces(SM::ServiceManager& service_manager) {
-    std::make_shared<NS>("ns:am2")->InstallAsService(service_manager);
-    std::make_shared<NS>("ns:ec")->InstallAsService(service_manager);
-    std::make_shared<NS>("ns:rid")->InstallAsService(service_manager);
-    std::make_shared<NS>("ns:rt")->InstallAsService(service_manager);
-    std::make_shared<NS>("ns:web")->InstallAsService(service_manager);
+void InstallInterfaces(SM::ServiceManager& service_manager, Core::System& system) {
 
-    std::make_shared<NS_DEV>()->InstallAsService(service_manager);
-    std::make_shared<NS_SU>()->InstallAsService(service_manager);
-    std::make_shared<NS_VM>()->InstallAsService(service_manager);
+    std::make_shared<NS>("ns:am2", system)->InstallAsService(service_manager);
+    std::make_shared<NS>("ns:ec", system)->InstallAsService(service_manager);
+    std::make_shared<NS>("ns:rid", system)->InstallAsService(service_manager);
+    std::make_shared<NS>("ns:rt", system)->InstallAsService(service_manager);
+    std::make_shared<NS>("ns:web", system)->InstallAsService(service_manager);
 
-    std::make_shared<PL_U>()->InstallAsService(service_manager);
+    std::make_shared<NS_DEV>(system)->InstallAsService(service_manager);
+    std::make_shared<NS_SU>(system)->InstallAsService(service_manager);
+    std::make_shared<NS_VM>(system)->InstallAsService(service_manager);
+
+    std::make_shared<PL_U>(system)->InstallAsService(service_manager);
 }
 
 } // namespace Service::NS

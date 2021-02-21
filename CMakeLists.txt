@@ -1,7 +1,8 @@
-cmake_minimum_required(VERSION 3.7)
+cmake_minimum_required(VERSION 3.15)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/CMakeModules")
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/externals/cmake-modules")
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/externals/find-modules")
 include(DownloadExternals)
 include(CMakeDependentOption)
 
@@ -10,24 +11,35 @@ project(yuzu)
 # Set bundled sdl2/qt as dependent options.
 # OFF by default, but if ENABLE_SDL2 and MSVC are true then ON
 option(ENABLE_SDL2 "Enable the SDL2 frontend" ON)
-CMAKE_DEPENDENT_OPTION(YUZU_USE_BUNDLED_SDL2 "Download bundled SDL2 binaries" ON "ENABLE_SDL2;MSVC" OFF)
 
 option(ENABLE_QT "Enable the Qt frontend" ON)
+option(ENABLE_QT_TRANSLATION "Enable translations for the Qt frontend" OFF)
 CMAKE_DEPENDENT_OPTION(YUZU_USE_BUNDLED_QT "Download bundled Qt binaries" ON "ENABLE_QT;MSVC" OFF)
 
 option(ENABLE_WEB_SERVICE "Enable web services (telemetry, etc.)" ON)
 
-option(YUZU_USE_BUNDLED_UNICORN "Build/Download bundled Unicorn" ON)
+CMAKE_DEPENDENT_OPTION(YUZU_USE_BUNDLED_FFMPEG "Download/Build bundled yuzu" ON "WIN32" OFF)
 
 option(YUZU_USE_QT_WEB_ENGINE "Use QtWebEngine for web applet implementation" OFF)
 
-option(ENABLE_CUBEB "Enables the cubeb audio backend" ON)
+option(YUZU_ENABLE_BOXCAT "Enable the Boxcat service, a yuzu high-level implementation of BCAT" ON)
 
-option(ENABLE_VULKAN "Enables Vulkan backend" ON)
+option(ENABLE_CUBEB "Enables the cubeb audio backend" ON)
 
 option(USE_DISCORD_PRESENCE "Enables Discord Rich Presence" OFF)
 
-if(NOT EXISTS ${PROJECT_SOURCE_DIR}/.git/hooks/pre-commit)
+if (NOT ENABLE_WEB_SERVICE)
+    set(YUZU_ENABLE_BOXCAT OFF)
+endif()
+
+# Default to a Release build
+get_property(IS_MULTI_CONFIG GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+if (NOT IS_MULTI_CONFIG AND NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Choose the type of build, options are: Debug Release RelWithDebInfo MinSizeRel." FORCE)
+    message(STATUS "Defaulting to a Release build")
+endif()
+
+if(EXISTS ${PROJECT_SOURCE_DIR}/hooks/pre-commit AND NOT EXISTS ${PROJECT_SOURCE_DIR}/.git/hooks/pre-commit)
     message(STATUS "Copying pre-commit hook")
     file(COPY hooks/pre-commit
         DESTINATION ${PROJECT_SOURCE_DIR}/.git/hooks)
@@ -47,8 +59,10 @@ function(check_submodules_present)
         endif()
     endforeach()
 endfunction()
-check_submodules_present()
 
+if(EXISTS ${PROJECT_SOURCE_DIR}/.gitmodules)
+    check_submodules_present()
+endif()
 configure_file(${PROJECT_SOURCE_DIR}/dist/compatibility_list/compatibility_list.qrc
                ${PROJECT_BINARY_DIR}/dist/compatibility_list/compatibility_list.qrc
                COPYONLY)
@@ -103,138 +117,120 @@ if (NOT DEFINED ARCHITECTURE)
 endif()
 message(STATUS "Target architecture: ${ARCHITECTURE}")
 
+if (UNIX)
+    add_definitions(-DYUZU_UNIX=1)
+endif()
 
 # Configure C++ standard
 # ===========================
 
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
+# boost asio's concept usage doesn't play nicely with some compilers yet.
+add_definitions(-DBOOST_ASIO_DISABLE_CONCEPTS)
+if (MSVC)
+    add_compile_options(/std:c++latest)
 
-# System imported libraries
-# ======================
-
-find_package(Boost 1.66.0 QUIET)
-if (NOT Boost_FOUND)
-    message(STATUS "Boost 1.66.0 or newer not found, falling back to externals")
-
-    set(BOOST_ROOT "${PROJECT_SOURCE_DIR}/externals/boost")
-    set(Boost_NO_SYSTEM_PATHS OFF)
-    find_package(Boost QUIET REQUIRED)
+    # cubeb and boost still make use of deprecated result_of.
+    add_definitions(-D_HAS_DEPRECATED_RESULT_OF)
+else()
+    set(CMAKE_CXX_STANDARD 20)
+    set(CMAKE_CXX_STANDARD_REQUIRED ON)
 endif()
 
 # Output binaries to bin/
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/bin)
 
-# Prefer the -pthread flag on Linux.
-set(THREADS_PREFER_PTHREAD_FLAG ON)
-find_package(Threads REQUIRED)
-
-if (ENABLE_SDL2)
-    if (YUZU_USE_BUNDLED_SDL2)
-        # Detect toolchain and platform
-        if ((MSVC_VERSION GREATER_EQUAL 1910 AND MSVC_VERSION LESS 1930) AND ARCHITECTURE_x86_64)
-            set(SDL2_VER "SDL2-2.0.8")
-        else()
-            message(FATAL_ERROR "No bundled SDL2 binaries for your toolchain. Disable YUZU_USE_BUNDLED_SDL2 and provide your own.")
-        endif()
-
-        if (DEFINED SDL2_VER)
-            download_bundled_external("sdl2/" ${SDL2_VER} SDL2_PREFIX)
-        endif()
-
-        set(SDL2_FOUND YES)
-        set(SDL2_INCLUDE_DIR "${SDL2_PREFIX}/include" CACHE PATH "Path to SDL2 headers")
-        set(SDL2_LIBRARY "${SDL2_PREFIX}/lib/x64/SDL2.lib" CACHE PATH "Path to SDL2 library")
-        set(SDL2_DLL_DIR "${SDL2_PREFIX}/lib/x64/" CACHE PATH "Path to SDL2.dll")
+# System imported libraries
+# If not found, download any missing through Conan
+# =======================================================================
+set(CONAN_CMAKE_SILENT_OUTPUT TRUE)
+set(CMAKE_FIND_PACKAGE_PREFER_CONFIG TRUE)
+if (YUZU_CONAN_INSTALLED)
+    if (IS_MULTI_CONFIG)
+        include(${CMAKE_BINARY_DIR}/conanbuildinfo_multi.cmake)
     else()
-        find_package(SDL2 REQUIRED)
+        include(${CMAKE_BINARY_DIR}/conanbuildinfo.cmake)
     endif()
-
-    if (SDL2_FOUND)
-        # TODO(yuriks): Make FindSDL2.cmake export an IMPORTED library instead
-        add_library(SDL2 INTERFACE)
-        target_link_libraries(SDL2 INTERFACE "${SDL2_LIBRARY}")
-        target_include_directories(SDL2 INTERFACE "${SDL2_INCLUDE_DIR}")
-    endif()
-else()
-    set(SDL2_FOUND NO)
+    list(APPEND CMAKE_MODULE_PATH "${CMAKE_BINARY_DIR}")
+    list(APPEND CMAKE_PREFIX_PATH "${CMAKE_BINARY_DIR}")
+    conan_basic_setup()
+    message(STATUS "Adding conan installed libraries to the search path")
 endif()
 
-# If unicorn isn't found, msvc -> download bundled unicorn; everyone else -> build external
-if (YUZU_USE_BUNDLED_UNICORN)
-    if (MSVC)
-        message(STATUS "unicorn not found, falling back to bundled")
-        # Detect toolchain and platform
+macro(yuzu_find_packages)
+    set(options FORCE_REQUIRED)
+    cmake_parse_arguments(FN "${options}" "" "" ${ARGN})
+
+    # Cmake has a *serious* lack of 2D array or associative array...
+    # Capitalization matters here. We need the naming to match the generated paths from Conan
+    set(REQUIRED_LIBS
+    #    Cmake Pkg Prefix  Version     Conan Pkg
+        "Catch2            2.13        catch2/2.13.0"
+        "fmt               7.1         fmt/7.1.2"
+    # can't use until https://github.com/bincrafters/community/issues/1173
+        #"libzip            1.5         libzip/1.5.2@bincrafters/stable"
+        "lz4               1.8         lz4/1.9.2"
+        "nlohmann_json     3.8         nlohmann_json/3.8.0"
+        "ZLIB              1.2         zlib/1.2.11"
+        "zstd              1.4         zstd/1.4.8"
+    )
+
+    foreach(PACKAGE ${REQUIRED_LIBS})
+        string(REGEX REPLACE "[ \t\r\n]+" ";" PACKAGE_SPLIT ${PACKAGE})
+        list(GET PACKAGE_SPLIT 0 PACKAGE_PREFIX)
+        list(GET PACKAGE_SPLIT 1 PACKAGE_VERSION)
+        list(GET PACKAGE_SPLIT 2 PACKAGE_CONAN)
+        # This function is called twice, once to check if the packages exist on the system already
+        # and a second time to check if conan installed them properly. The second check passes in FORCE_REQUIRED
+        if (NOT ${PACKAGE_PREFIX}_FOUND)
+            if (FN_FORCE_REQUIRED)
+                find_package(${PACKAGE_PREFIX} ${PACKAGE_VERSION} REQUIRED)
+            else()
+                find_package(${PACKAGE_PREFIX} ${PACKAGE_VERSION})
+            endif()
+        endif()
+        if (NOT ${PACKAGE_PREFIX}_FOUND)
+            list(APPEND CONAN_REQUIRED_LIBS ${PACKAGE_CONAN})
+        else()
+            # Set a legacy findPackage.cmake style PACKAGE_LIBRARIES variable for subprojects that rely on this
+            set(${PACKAGE_PREFIX}_LIBRARIES "${PACKAGE_PREFIX}::${PACKAGE_PREFIX}")
+        endif()
+    endforeach()
+    unset(FN_FORCE_REQUIRED)
+endmacro()
+
+find_package(Boost 1.73.0 COMPONENTS context headers QUIET)
+if (Boost_FOUND)
+    set(Boost_LIBRARIES Boost::boost)
+    # Conditionally add Boost::context only if the active version of the Conan or system Boost package provides it
+    # The old version is missing Boost::context, so we want to avoid adding in that case
+    # The new version requires adding Boost::context to prevent linking issues
+    #
+    # This one is used by Conan on subsequent CMake configures, not the first configure.
+    if (TARGET Boost::context)
+        list(APPEND Boost_LIBRARIES Boost::context)
+    endif()
+else()
+    message(STATUS "Boost 1.73.0 or newer not found, falling back to Conan")
+    list(APPEND CONAN_REQUIRED_LIBS "boost/1.73.0")
+endif()
+
+# Attempt to locate any packages that are required and report the missing ones in CONAN_REQUIRED_LIBS
+yuzu_find_packages()
+
+# Qt5 requires that we find components, so it doesn't fit our pretty little find package function
+if(ENABLE_QT)
+    # We want to load the generated conan qt config so that we get the QT_ROOT var so that we can use the official
+    # Qt5Config inside the root folder instead of the conan generated one.
+    if(EXISTS ${CMAKE_BINARY_DIR}/qtConfig.cmake)
+        include(${CMAKE_BINARY_DIR}/qtConfig.cmake)
+        list(APPEND CMAKE_MODULE_PATH "${CONAN_QT_ROOT_RELEASE}")
+        list(APPEND CMAKE_PREFIX_PATH "${CONAN_QT_ROOT_RELEASE}")
+    endif()
+    # Workaround for an issue where conan tries to build Qt from scratch instead of download prebuilt binaries
+    set(QT_PREFIX_HINT)
+    if(YUZU_USE_BUNDLED_QT)
         if ((MSVC_VERSION GREATER_EQUAL 1910 AND MSVC_VERSION LESS 1930) AND ARCHITECTURE_x86_64)
-            set(UNICORN_VER "unicorn-yuzu")
-        else()
-            message(FATAL_ERROR "No bundled Unicorn binaries for your toolchain. Disable YUZU_USE_BUNDLED_UNICORN and provide your own.")
-        endif()
-
-        if (DEFINED UNICORN_VER)
-            download_bundled_external("unicorn/" ${UNICORN_VER} UNICORN_PREFIX)
-        endif()
-
-        if (DEFINED UNICORN_VER)
-            download_bundled_external("unicorn/" ${UNICORN_VER} UNICORN_PREFIX)
-        endif()
-
-        set(UNICORN_FOUND YES)
-        set(LIBUNICORN_INCLUDE_DIR "${UNICORN_PREFIX}/include" CACHE PATH "Path to Unicorn headers" FORCE)
-        set(LIBUNICORN_LIBRARY "${UNICORN_PREFIX}/lib/x64/unicorn_dynload.lib" CACHE PATH "Path to Unicorn library" FORCE)
-        set(UNICORN_DLL_DIR "${UNICORN_PREFIX}/lib/x64/" CACHE PATH "Path to unicorn.dll" FORCE)
-    else()
-        message(STATUS "unicorn not found, falling back to externals")
-        if (MINGW)
-            set(UNICORN_LIB_NAME "unicorn.a")
-        else()
-            set(UNICORN_LIB_NAME "libunicorn.a")
-        endif()
-
-        set(UNICORN_FOUND YES)
-        set(UNICORN_PREFIX ${PROJECT_SOURCE_DIR}/externals/unicorn)
-        set(LIBUNICORN_LIBRARY "${UNICORN_PREFIX}/${UNICORN_LIB_NAME}" CACHE PATH "Path to Unicorn library" FORCE)
-        set(LIBUNICORN_INCLUDE_DIR "${UNICORN_PREFIX}/include" CACHE PATH "Path to Unicorn headers" FORCE)
-        set(UNICORN_DLL_DIR "${UNICORN_PREFIX}/" CACHE PATH "Path to unicorn dynamic library" FORCE)
-
-        find_package(PythonInterp 2.7 REQUIRED)
-
-        if (MINGW)
-            add_custom_command(OUTPUT ${LIBUNICORN_LIBRARY}
-                COMMAND ${CMAKE_COMMAND} -E env UNICORN_ARCHS="aarch64" PYTHON="${PYTHON_EXECUTABLE}" /bin/sh make.sh cross-win64
-                WORKING_DIRECTORY ${UNICORN_PREFIX}
-            )
-        else()
-            add_custom_command(OUTPUT ${LIBUNICORN_LIBRARY}
-                COMMAND ${CMAKE_COMMAND} -E env UNICORN_ARCHS="aarch64" PYTHON="${PYTHON_EXECUTABLE}" /bin/sh make.sh macos-universal-no
-                WORKING_DIRECTORY ${UNICORN_PREFIX}
-            )
-        endif()
-
-        # ALL makes this custom target build every time
-        # but it won't actually build if LIBUNICORN_LIBRARY is up to date
-        add_custom_target(unicorn-build ALL
-            DEPENDS ${LIBUNICORN_LIBRARY}
-        )
-        unset(UNICORN_LIB_NAME)
-    endif()
-else()
-    find_package(Unicorn REQUIRED)
-endif()
-
-if (UNICORN_FOUND)
-    add_library(unicorn INTERFACE)
-    add_dependencies(unicorn unicorn-build)
-    target_link_libraries(unicorn INTERFACE "${LIBUNICORN_LIBRARY}")
-    target_include_directories(unicorn INTERFACE "${LIBUNICORN_INCLUDE_DIR}")
-else()
-    message(FATAL_ERROR "Could not find or build unicorn which is required.")
-endif()
-
-if (ENABLE_QT)
-    if (YUZU_USE_BUNDLED_QT)
-        if ((MSVC_VERSION GREATER_EQUAL 1910 AND MSVC_VERSION LESS 1930) AND ARCHITECTURE_x86_64)
-            set(QT_VER qt-5.12.0-msvc2017_64)
+            set(QT_VER qt-5.12.8-msvc2017_64)
         else()
             message(FATAL_ERROR "No bundled Qt binaries for your toolchain. Disable YUZU_USE_BUNDLED_QT and provide your own.")
         endif()
@@ -244,18 +240,290 @@ if (ENABLE_QT)
         endif()
 
         set(QT_PREFIX_HINT HINTS "${QT_PREFIX}")
-    else()
-        # Passing an empty HINTS seems to cause default system paths to get ignored in CMake 2.8 so
-        # make sure to not pass anything if we don't have one.
-        set(QT_PREFIX_HINT)
+    endif()
+    find_package(Qt5 5.9 COMPONENTS Widgets ${QT_PREFIX_HINT})
+    if (YUZU_USE_QT_WEB_ENGINE)
+        find_package(Qt5 COMPONENTS WebEngineCore WebEngineWidgets)
     endif()
 
-    find_package(Qt5 REQUIRED COMPONENTS Widgets OpenGL ${QT_PREFIX_HINT})
-
-    if (YUZU_USE_QT_WEB_ENGINE)
-        find_package(Qt5 REQUIRED COMPONENTS WebEngineCore WebEngineWidgets ${QT_PREFIX_HINT})
-    endif ()
+    if (ENABLE_QT_TRANSLATION)
+        find_package(Qt5 REQUIRED COMPONENTS LinguistTools ${QT_PREFIX_HINT})
+    endif()
+    if (NOT Qt5_FOUND)
+        list(APPEND CONAN_REQUIRED_LIBS "qt/5.14.1@bincrafters/stable")
+    endif()
 endif()
+# find SDL2 exports a bunch of variables that are needed, so its easier to do this outside of the yuzu_find_package
+if(ENABLE_SDL2)
+    if(EXISTS ${CMAKE_BINARY_DIR}/sdl2Config.cmake)
+        include(${CMAKE_BINARY_DIR}/sdl2Config.cmake)
+        list(APPEND CMAKE_MODULE_PATH "${CONAN_SDL2_ROOT_RELEASE}")
+        list(APPEND CMAKE_PREFIX_PATH "${CONAN_SDL2_ROOT_RELEASE}")
+    endif()
+    find_package(SDL2)
+    if (NOT SDL2_FOUND)
+        # otherwise add this to the list of libraries to install
+        list(APPEND CONAN_REQUIRED_LIBS "sdl2/2.0.14@bincrafters/stable")
+    endif()
+endif()
+
+# Install any missing dependencies with conan install
+if (CONAN_REQUIRED_LIBS)
+    message(STATUS "Packages ${CONAN_REQUIRED_LIBS} not found!")
+    # Use Conan to fetch the libraries that aren't found
+    # Download conan.cmake automatically, you can also just copy the conan.cmake file
+    if(NOT EXISTS "${CMAKE_BINARY_DIR}/conan.cmake")
+        message(STATUS "Downloading conan.cmake from https://github.com/conan-io/cmake-conan")
+        file(DOWNLOAD "https://github.com/conan-io/cmake-conan/raw/v0.15/conan.cmake"
+                        "${CMAKE_BINARY_DIR}/conan.cmake")
+    endif()
+    include(${CMAKE_BINARY_DIR}/conan.cmake)
+
+    set(CONAN_LIB_OPTIONS
+        libzip:with_openssl=False
+        libzip:enable_windows_crypto=False
+    )
+
+    conan_check(VERSION 1.24.0 REQUIRED)
+    # Add the bincrafters remote
+    conan_add_remote(NAME bincrafters
+                    URL https://api.bintray.com/conan/bincrafters/public-conan)
+
+    # Manually add iconv to fix a dep conflict between qt and sdl2
+    # We don't need to add it through find_package or anything since the other two can find it just fine
+    if ("${CONAN_REQUIRED_LIBS}" MATCHES "qt" AND "${CONAN_REQUIRED_LIBS}" MATCHES "sdl")
+        list(APPEND CONAN_REQUIRED_LIBS "libiconv/1.16")
+    endif()
+    if (IS_MULTI_CONFIG)
+        conan_cmake_run(REQUIRES ${CONAN_REQUIRED_LIBS}
+                        OPTIONS ${CONAN_LIB_OPTIONS}
+                        BUILD missing
+                        CONFIGURATION_TYPES "Release;Debug"
+                        GENERATORS cmake_multi cmake_find_package_multi)
+        include(${CMAKE_BINARY_DIR}/conanbuildinfo_multi.cmake)
+    else()
+        conan_cmake_run(REQUIRES ${CONAN_REQUIRED_LIBS}
+                        OPTIONS ${CONAN_LIB_OPTIONS}
+                        BUILD missing
+                        GENERATORS cmake cmake_find_package_multi)
+        include(${CMAKE_BINARY_DIR}/conanbuildinfo.cmake)
+    endif()
+    list(APPEND CMAKE_MODULE_PATH "${CMAKE_BINARY_DIR}")
+    list(APPEND CMAKE_PREFIX_PATH "${CMAKE_BINARY_DIR}")
+    conan_basic_setup()
+
+    set(YUZU_CONAN_INSTALLED TRUE CACHE BOOL "If true, the following builds will add conan to the lib search path" FORCE)
+
+    # Now that we've installed what we are missing, try to locate them again,
+    # this time with required, so we bail if its not found.
+    yuzu_find_packages(FORCE_REQUIRED)
+
+    if (NOT Boost_FOUND)
+        find_package(Boost 1.73.0 REQUIRED COMPONENTS context headers)
+        set(Boost_LIBRARIES Boost::boost)
+        # Conditionally add Boost::context only if the active version of the Conan Boost package provides it
+        # The old version is missing Boost::context, so we want to avoid adding in that case
+        # The new version requires adding Boost::context to prevent linking issues
+        if (TARGET Boost::context)
+            list(APPEND Boost_LIBRARIES Boost::context)
+        endif()
+    endif()
+
+    # Due to issues with variable scopes in functions, we need to also find_package(qt5) outside of the function
+    if(ENABLE_QT)
+        list(APPEND CMAKE_MODULE_PATH "${CONAN_QT_ROOT_RELEASE}")
+        list(APPEND CMAKE_PREFIX_PATH "${CONAN_QT_ROOT_RELEASE}")
+        find_package(Qt5 5.9 REQUIRED COMPONENTS Widgets)
+        if (YUZU_USE_QT_WEB_ENGINE)
+            find_package(Qt5 REQUIRED COMPONENTS WebEngineCore WebEngineWidgets)
+        endif()
+    endif()
+    if(ENABLE_SDL2)
+        list(APPEND CMAKE_MODULE_PATH "${CONAN_SDL2_ROOT_RELEASE}")
+        list(APPEND CMAKE_PREFIX_PATH "${CONAN_SDL2_ROOT_RELEASE}")
+        find_package(SDL2 REQUIRED)
+    endif()
+
+endif()
+
+# Reexport some targets that are named differently when using the upstream CmakeConfig vs the generated Conan config
+# In order to ALIAS targets to a new name, they first need to be IMPORTED_GLOBAL
+# Dynarmic checks for target `boost` and so we want to make sure it can find it through our system instead of using their external
+if (TARGET Boost::Boost)
+    set_target_properties(Boost::Boost PROPERTIES IMPORTED_GLOBAL TRUE)
+    add_library(Boost::boost ALIAS Boost::Boost)
+    add_library(boost ALIAS Boost::Boost)
+elseif (TARGET Boost::boost)
+    set_target_properties(Boost::boost PROPERTIES IMPORTED_GLOBAL TRUE)
+    add_library(boost ALIAS Boost::boost)
+endif()
+
+if (TARGET sdl2::sdl2)
+    # imported from the conan generated sdl2Config.cmake
+    set_target_properties(sdl2::sdl2 PROPERTIES IMPORTED_GLOBAL TRUE)
+    add_library(SDL2 ALIAS sdl2::sdl2)
+elseif(SDL2_FOUND)
+    # found through the system package manager
+    # Some installations don't set SDL2_LIBRARIES
+    if("${SDL2_LIBRARIES}" STREQUAL "")
+        message(WARNING "SDL2_LIBRARIES wasn't set, manually setting to SDL2::SDL2")
+        set(SDL2_LIBRARIES "SDL2::SDL2")
+    endif()
+
+    include_directories(SYSTEM ${SDL2_INCLUDE_DIRS})
+    add_library(SDL2 INTERFACE)
+    target_link_libraries(SDL2 INTERFACE "${SDL2_LIBRARIES}")
+endif()
+
+# Ensure libusb is properly configured (based on dolphin libusb include)
+if(NOT APPLE)
+    include(FindPkgConfig)
+    find_package(LibUSB)
+endif()
+if (NOT LIBUSB_FOUND)
+    add_subdirectory(externals/libusb)
+    set(LIBUSB_INCLUDE_DIR "")
+    set(LIBUSB_LIBRARIES usb)
+endif()
+
+# List of all FFmpeg components required
+set(FFmpeg_COMPONENTS
+    avcodec
+    avutil
+    swscale)
+
+if (NOT YUZU_USE_BUNDLED_FFMPEG)
+    # Use system installed FFmpeg
+    find_package(FFmpeg REQUIRED COMPONENTS ${FFmpeg_COMPONENTS})
+
+    if (FFmpeg_FOUND)
+        # Overwrite aggregate defines from FFmpeg module to avoid over-linking libraries.
+        # Prevents shipping too many libraries with the AppImage.
+        set(FFmpeg_LIBRARIES "")
+        set(FFmpeg_INCLUDE_DIR "")
+
+        foreach(COMPONENT ${FFmpeg_COMPONENTS})
+            set(FFmpeg_LIBRARIES ${FFmpeg_LIBRARIES} ${FFmpeg_LIBRARY_${COMPONENT}} CACHE PATH "Paths to FFmpeg libraries" FORCE)
+            set(FFmpeg_INCLUDE_DIR ${FFmpeg_INCLUDE_DIR} ${FFmpeg_INCLUDE_${COMPONENT}} CACHE PATH "Path to FFmpeg headers" FORCE)
+        endforeach()
+    else()
+        message(WARNING "FFmpeg not found, falling back to externals")
+        set(YUZU_USE_BUNDLED_FFMPEG ON)
+    endif()
+endif()
+
+if (YUZU_USE_BUNDLED_FFMPEG)
+    if (NOT WIN32)
+        # Build FFmpeg from externals
+        message(STATUS "Using FFmpeg from externals")
+
+        # FFmpeg has source that requires one of nasm or yasm to assemble it.
+        # REQUIRED throws an error if not found here during configuration rather than during compilation.
+        find_program(ASSEMBLER NAMES nasm yasm REQUIRED)
+
+        set(FFmpeg_PREFIX ${PROJECT_SOURCE_DIR}/externals/ffmpeg)
+        set(FFmpeg_BUILD_DIR ${PROJECT_BINARY_DIR}/externals/ffmpeg)
+        set(FFmpeg_MAKEFILE ${FFmpeg_BUILD_DIR}/Makefile)
+        make_directory(${FFmpeg_BUILD_DIR})
+
+        # Read version string from external
+        file(READ ${FFmpeg_PREFIX}/RELEASE FFmpeg_VERSION)
+        set(FFmpeg_FOUND NO)
+        if (NOT FFmpeg_VERSION STREQUAL "")
+            set(FFmpeg_FOUND YES)
+        endif()
+
+        foreach(COMPONENT ${FFmpeg_COMPONENTS})
+            set(FFmpeg_${COMPONENT}_PREFIX "${FFmpeg_BUILD_DIR}/lib${COMPONENT}")
+            set(FFmpeg_${COMPONENT}_LIB_NAME "lib${COMPONENT}.a")
+            set(FFmpeg_${COMPONENT}_LIBRARY "${FFmpeg_${COMPONENT}_PREFIX}/${FFmpeg_${COMPONENT}_LIB_NAME}")
+
+            set(FFmpeg_LIBRARIES
+                ${FFmpeg_LIBRARIES}
+                ${FFmpeg_${COMPONENT}_LIBRARY}
+                CACHE PATH "Paths to FFmpeg libraries" FORCE)
+        endforeach()
+
+        set(FFmpeg_INCLUDE_DIR
+            ${FFmpeg_PREFIX}
+            CACHE PATH "Path to FFmpeg headers" FORCE)
+
+        # `configure` parameters builds only exactly what yuzu needs from FFmpeg
+        # `--disable-{vaapi,vdpau}` is needed to avoid linking issues
+        add_custom_command(
+            OUTPUT
+                ${FFmpeg_MAKEFILE}
+            COMMAND
+                /bin/bash ${FFmpeg_PREFIX}/configure
+                    --disable-avdevice
+                    --disable-avfilter
+                    --disable-avformat
+                    --disable-doc
+                    --disable-everything
+                    --disable-ffmpeg
+                    --disable-ffprobe
+                    --disable-network
+                    --disable-postproc
+                    --disable-swresample
+                    --disable-vaapi
+                    --disable-vdpau
+                    --enable-decoder=h264
+                    --enable-decoder=vp9
+            WORKING_DIRECTORY
+                ${FFmpeg_BUILD_DIR}
+        )
+
+        # Workaround for Ubuntu 18.04's older version of make not being able to call make as a child
+        # with context of the jobserver. Also helps ninja users.
+        execute_process(
+            COMMAND
+                nproc
+            OUTPUT_VARIABLE
+                SYSTEM_THREADS)
+
+        add_custom_command(
+            OUTPUT
+                ${FFmpeg_LIBRARIES}
+            COMMAND
+                make -j${SYSTEM_THREADS}
+            WORKING_DIRECTORY
+                ${FFmpeg_BUILD_DIR}
+        )
+
+        # ALL makes this custom target build every time
+        # but it won't actually build if the DEPENDS parameter is up to date
+        add_custom_target(ffmpeg-build ALL DEPENDS ${FFmpeg_LIBRARIES})
+        add_custom_target(ffmpeg-configure ALL DEPENDS ${FFmpeg_MAKEFILE})
+
+        if (FFmpeg_FOUND)
+            message(STATUS "Found FFmpeg version ${FFmpeg_VERSION}")
+
+            add_dependencies(ffmpeg-build ffmpeg-configure)
+        else()
+            message(FATAL_ERROR "FFmpeg not found")
+        endif()
+    else() # WIN32
+        # Use yuzu FFmpeg binaries
+        set(FFmpeg_EXT_NAME "ffmpeg-4.3.1")
+        set(FFmpeg_PATH "${CMAKE_BINARY_DIR}/externals/${FFmpeg_EXT_NAME}")
+        download_bundled_external("ffmpeg/" ${FFmpeg_EXT_NAME} "")
+        set(FFmpeg_FOUND YES)
+        set(FFmpeg_INCLUDE_DIR "${FFmpeg_PATH}/include" CACHE PATH "Path to FFmpeg headers" FORCE)
+        set(FFmpeg_LIBRARY_DIR "${FFmpeg_PATH}/bin" CACHE PATH "Path to FFmpeg library directory" FORCE)
+        set(FFmpeg_DLL_DIR "${FFmpeg_PATH}/bin" CACHE PATH "Path to FFmpeg dll's" FORCE)
+        set(FFmpeg_LIBRARIES
+            ${FFmpeg_LIBRARY_DIR}/swscale.lib
+            ${FFmpeg_LIBRARY_DIR}/avcodec.lib
+            ${FFmpeg_LIBRARY_DIR}/avutil.lib
+            CACHE PATH "Paths to FFmpeg libraries" FORCE)
+    endif()
+endif()
+
+unset(FFmpeg_COMPONENTS)
+
+# Prefer the -pthread flag on Linux.
+set(THREADS_PREFER_PTHREAD_FLAG ON)
+find_package(Threads REQUIRED)
 
 # Platform-specific library requirements
 # ======================================
@@ -280,14 +548,14 @@ endif()
 # against all the src files. This should be used before making a pull request.
 # =======================================================================
 
-set(CLANG_FORMAT_POSTFIX "-6.0")
+set(CLANG_FORMAT_POSTFIX "-10")
 find_program(CLANG_FORMAT
     NAMES clang-format${CLANG_FORMAT_POSTFIX}
           clang-format
     PATHS ${PROJECT_BINARY_DIR}/externals)
 # if find_program doesn't find it, try to download from externals
 if (NOT CLANG_FORMAT)
-    if (WIN32)
+    if (WIN32 AND NOT CMAKE_CROSSCOMPILING)
         message(STATUS "Clang format not found! Downloading...")
         set(CLANG_FORMAT "${PROJECT_BINARY_DIR}/externals/clang-format${CLANG_FORMAT_POSTFIX}.exe")
         file(DOWNLOAD
@@ -344,6 +612,13 @@ function(create_target_directory_groups target_name)
         source_group("${group_name}" FILES "${file_name}")
     endforeach()
 endfunction()
+
+# Prevent boost from linking against libs when building
+add_definitions(-DBOOST_ERROR_CODE_HEADER_ONLY
+    -DBOOST_SYSTEM_NO_LIB
+    -DBOOST_DATE_TIME_NO_LIB
+    -DBOOST_REGEX_NO_LIB
+)
 
 enable_testing()
 add_subdirectory(externals)

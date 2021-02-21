@@ -11,11 +11,16 @@
 
 namespace VideoCommon::Shader {
 
+using std::move;
 using Tegra::Shader::ConditionCode;
 using Tegra::Shader::Instruction;
+using Tegra::Shader::IpaInterpMode;
 using Tegra::Shader::OpCode;
+using Tegra::Shader::PixelImap;
 using Tegra::Shader::Register;
 using Tegra::Shader::SystemVariable;
+
+using Index = Tegra::Shader::Attribute::Index;
 
 u32 ShaderIR::DecodeOther(NodeBlock& bb, u32 pc) {
     const Instruction instr = {program_code[pc]};
@@ -29,14 +34,13 @@ u32 ShaderIR::DecodeOther(NodeBlock& bb, u32 pc) {
         break;
     }
     case OpCode::Id::EXIT: {
-        const Tegra::Shader::ConditionCode cc = instr.flow_condition_code;
-        UNIMPLEMENTED_IF_MSG(cc != Tegra::Shader::ConditionCode::T, "EXIT condition code used: {}",
-                             static_cast<u32>(cc));
+        const ConditionCode cc = instr.flow_condition_code;
+        UNIMPLEMENTED_IF_MSG(cc != ConditionCode::T, "EXIT condition code used: {}", cc);
 
         switch (instr.flow.cond) {
         case Tegra::Shader::FlowCondition::Always:
             bb.push_back(Operation(OperationCode::Exit));
-            if (instr.pred.pred_index == static_cast<u64>(Tegra::Shader::Pred::UnusedIndex)) {
+            if (instr.pred.pred_index == static_cast<u64>(Pred::UnusedIndex)) {
                 // If this is an unconditional exit then just end processing here,
                 // otherwise we have to account for the possibility of the condition
                 // not being met, so continue processing the next instruction.
@@ -51,35 +55,44 @@ u32 ShaderIR::DecodeOther(NodeBlock& bb, u32 pc) {
             break;
 
         default:
-            UNIMPLEMENTED_MSG("Unhandled flow condition: {}",
-                              static_cast<u32>(instr.flow.cond.Value()));
+            UNIMPLEMENTED_MSG("Unhandled flow condition: {}", instr.flow.cond.Value());
         }
         break;
     }
     case OpCode::Id::KIL: {
         UNIMPLEMENTED_IF(instr.flow.cond != Tegra::Shader::FlowCondition::Always);
 
-        const Tegra::Shader::ConditionCode cc = instr.flow_condition_code;
-        UNIMPLEMENTED_IF_MSG(cc != Tegra::Shader::ConditionCode::T, "KIL condition code used: {}",
-                             static_cast<u32>(cc));
+        const ConditionCode cc = instr.flow_condition_code;
+        UNIMPLEMENTED_IF_MSG(cc != ConditionCode::T, "KIL condition code used: {}", cc);
 
         bb.push_back(Operation(OperationCode::Discard));
         break;
     }
-    case OpCode::Id::MOV_SYS: {
-        const Node value = [&]() {
+    case OpCode::Id::S2R: {
+        const Node value = [this, instr] {
             switch (instr.sys20) {
+            case SystemVariable::LaneId:
+                return Operation(OperationCode::ThreadId);
+            case SystemVariable::InvocationId:
+                return Operation(OperationCode::InvocationId);
             case SystemVariable::Ydirection:
+                uses_y_negate = true;
                 return Operation(OperationCode::YNegate);
             case SystemVariable::InvocationInfo:
-                LOG_WARNING(HW_GPU, "MOV_SYS instruction with InvocationInfo is incomplete");
-                return Immediate(0u);
+                LOG_WARNING(HW_GPU, "S2R instruction with InvocationInfo is incomplete");
+                return Immediate(0x00ff'0000U);
+            case SystemVariable::WscaleFactorXY:
+                UNIMPLEMENTED_MSG("S2R WscaleFactorXY is not implemented");
+                return Immediate(0U);
+            case SystemVariable::WscaleFactorZ:
+                UNIMPLEMENTED_MSG("S2R WscaleFactorZ is not implemented");
+                return Immediate(0U);
             case SystemVariable::Tid: {
-                Node value = Immediate(0);
-                value = BitfieldInsert(value, Operation(OperationCode::LocalInvocationIdX), 0, 9);
-                value = BitfieldInsert(value, Operation(OperationCode::LocalInvocationIdY), 16, 9);
-                value = BitfieldInsert(value, Operation(OperationCode::LocalInvocationIdZ), 26, 5);
-                return value;
+                Node val = Immediate(0);
+                val = BitfieldInsert(val, Operation(OperationCode::LocalInvocationIdX), 0, 9);
+                val = BitfieldInsert(val, Operation(OperationCode::LocalInvocationIdY), 16, 9);
+                val = BitfieldInsert(val, Operation(OperationCode::LocalInvocationIdZ), 26, 5);
+                return val;
             }
             case SystemVariable::TidX:
                 return Operation(OperationCode::LocalInvocationIdX);
@@ -93,9 +106,29 @@ u32 ShaderIR::DecodeOther(NodeBlock& bb, u32 pc) {
                 return Operation(OperationCode::WorkGroupIdY);
             case SystemVariable::CtaIdZ:
                 return Operation(OperationCode::WorkGroupIdZ);
+            case SystemVariable::EqMask:
+            case SystemVariable::LtMask:
+            case SystemVariable::LeMask:
+            case SystemVariable::GtMask:
+            case SystemVariable::GeMask:
+                uses_warps = true;
+                switch (instr.sys20) {
+                case SystemVariable::EqMask:
+                    return Operation(OperationCode::ThreadEqMask);
+                case SystemVariable::LtMask:
+                    return Operation(OperationCode::ThreadLtMask);
+                case SystemVariable::LeMask:
+                    return Operation(OperationCode::ThreadLeMask);
+                case SystemVariable::GtMask:
+                    return Operation(OperationCode::ThreadGtMask);
+                case SystemVariable::GeMask:
+                    return Operation(OperationCode::ThreadGeMask);
+                default:
+                    UNREACHABLE();
+                    return Immediate(0u);
+                }
             default:
-                UNIMPLEMENTED_MSG("Unhandled system move: {}",
-                                  static_cast<u32>(instr.sys20.Value()));
+                UNIMPLEMENTED_MSG("Unhandled system move: {}", instr.sys20.Value());
                 return Immediate(0u);
             }
         }();
@@ -145,8 +178,8 @@ u32 ShaderIR::DecodeOther(NodeBlock& bb, u32 pc) {
         }
         const Node branch = Operation(OperationCode::BranchIndirect, operand);
 
-        const Tegra::Shader::ConditionCode cc = instr.flow_condition_code;
-        if (cc != Tegra::Shader::ConditionCode::T) {
+        const ConditionCode cc = instr.flow_condition_code;
+        if (cc != ConditionCode::T) {
             bb.push_back(Conditional(GetConditionCode(cc), {branch}));
         } else {
             bb.push_back(branch);
@@ -182,11 +215,10 @@ u32 ShaderIR::DecodeOther(NodeBlock& bb, u32 pc) {
         break;
     }
     case OpCode::Id::SYNC: {
-        const Tegra::Shader::ConditionCode cc = instr.flow_condition_code;
-        UNIMPLEMENTED_IF_MSG(cc != Tegra::Shader::ConditionCode::T, "SYNC condition code used: {}",
-                             static_cast<u32>(cc));
+        const ConditionCode cc = instr.flow_condition_code;
+        UNIMPLEMENTED_IF_MSG(cc != ConditionCode::T, "SYNC condition code used: {}", cc);
 
-        if (disable_flow_stack) {
+        if (decompiled) {
             break;
         }
 
@@ -195,10 +227,9 @@ u32 ShaderIR::DecodeOther(NodeBlock& bb, u32 pc) {
         break;
     }
     case OpCode::Id::BRK: {
-        const Tegra::Shader::ConditionCode cc = instr.flow_condition_code;
-        UNIMPLEMENTED_IF_MSG(cc != Tegra::Shader::ConditionCode::T, "BRK condition code used: {}",
-                             static_cast<u32>(cc));
-        if (disable_flow_stack) {
+        const ConditionCode cc = instr.flow_condition_code;
+        UNIMPLEMENTED_IF_MSG(cc != ConditionCode::T, "BRK condition code used: {}", cc);
+        if (decompiled) {
             break;
         }
 
@@ -208,27 +239,28 @@ u32 ShaderIR::DecodeOther(NodeBlock& bb, u32 pc) {
     }
     case OpCode::Id::IPA: {
         const bool is_physical = instr.ipa.idx && instr.gpr8.Value() != 0xff;
-
         const auto attribute = instr.attribute.fmt28;
-        const Tegra::Shader::IpaMode input_mode{instr.ipa.interp_mode.Value(),
-                                                instr.ipa.sample_mode.Value()};
+        const Index index = attribute.index;
 
         Node value = is_physical ? GetPhysicalInputAttribute(instr.gpr8)
-                                 : GetInputAttribute(attribute.index, attribute.element);
-        const Tegra::Shader::Attribute::Index index = attribute.index.Value();
-        const bool is_generic = index >= Tegra::Shader::Attribute::Index::Attribute_0 &&
-                                index <= Tegra::Shader::Attribute::Index::Attribute_31;
-        if (is_generic || is_physical) {
-            // TODO(Blinkhawk): There are cases where a perspective attribute use PASS.
-            // In theory by setting them as perspective, OpenGL does the perspective correction.
-            // A way must figured to reverse the last step of it.
-            if (input_mode.interpolation_mode == Tegra::Shader::IpaInterpMode::Multiply) {
-                value = Operation(OperationCode::FMul, PRECISE, value, GetRegister(instr.gpr20));
+                                 : GetInputAttribute(index, attribute.element);
+
+        // Code taken from Ryujinx.
+        if (index >= Index::Attribute_0 && index <= Index::Attribute_31) {
+            const u32 location = static_cast<u32>(index) - static_cast<u32>(Index::Attribute_0);
+            if (header.ps.GetPixelImap(location) == PixelImap::Perspective) {
+                Node position_w = GetInputAttribute(Index::Position, 3);
+                value = Operation(OperationCode::FMul, move(value), move(position_w));
             }
         }
-        value = GetSaturatedFloat(value, instr.ipa.saturate);
 
-        SetRegister(bb, instr.gpr0, value);
+        if (instr.ipa.interp_mode == IpaInterpMode::Multiply) {
+            value = Operation(OperationCode::FMul, move(value), GetRegister(instr.gpr20));
+        }
+
+        value = GetSaturatedFloat(move(value), instr.ipa.saturate);
+
+        SetRegister(bb, instr.gpr0, move(value));
         break;
     }
     case OpCode::Id::OUT_R: {
@@ -255,8 +287,29 @@ u32 ShaderIR::DecodeOther(NodeBlock& bb, u32 pc) {
         SetRegister(bb, instr.gpr0, GetRegister(instr.gpr8));
         break;
     }
+    case OpCode::Id::BAR: {
+        UNIMPLEMENTED_IF_MSG(instr.value != 0xF0A81B8000070000ULL, "BAR is not BAR.SYNC 0x0");
+        bb.push_back(Operation(OperationCode::Barrier));
+        break;
+    }
+    case OpCode::Id::MEMBAR: {
+        UNIMPLEMENTED_IF(instr.membar.unknown != Tegra::Shader::MembarUnknown::Default);
+        const OperationCode type = [instr] {
+            switch (instr.membar.type) {
+            case Tegra::Shader::MembarType::CTA:
+                return OperationCode::MemoryBarrierGroup;
+            case Tegra::Shader::MembarType::GL:
+                return OperationCode::MemoryBarrierGlobal;
+            default:
+                UNIMPLEMENTED_MSG("MEMBAR type={}", instr.membar.type.Value());
+                return OperationCode::MemoryBarrierGlobal;
+            }
+        }();
+        bb.push_back(Operation(type));
+        break;
+    }
     case OpCode::Id::DEPBAR: {
-        LOG_WARNING(HW_GPU, "DEPBAR instruction is stubbed");
+        LOG_DEBUG(HW_GPU, "DEPBAR instruction is stubbed");
         break;
     }
     default:

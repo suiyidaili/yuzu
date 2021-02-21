@@ -240,7 +240,7 @@ RomFSBuildContext::RomFSBuildContext(VirtualDir base_, VirtualDir ext_)
 
 RomFSBuildContext::~RomFSBuildContext() = default;
 
-std::map<u64, VirtualFile> RomFSBuildContext::Build() {
+std::multimap<u64, VirtualFile> RomFSBuildContext::Build() {
     const u64 dir_hash_table_entry_count = romfs_get_hash_table_count(num_dirs);
     const u64 file_hash_table_entry_count = romfs_get_hash_table_count(num_files);
     dir_hash_table_size = 4 * dir_hash_table_entry_count;
@@ -266,8 +266,9 @@ std::map<u64, VirtualFile> RomFSBuildContext::Build() {
         cur_file->offset = file_partition_size;
         file_partition_size += cur_file->size;
         cur_file->entry_offset = entry_offset;
-        entry_offset += sizeof(RomFSFileEntry) +
-                        Common::AlignUp(cur_file->path_len - cur_file->cur_path_ofs, 4);
+        entry_offset +=
+            static_cast<u32>(sizeof(RomFSFileEntry) +
+                             Common::AlignUp(cur_file->path_len - cur_file->cur_path_ofs, 4));
         prev_file = cur_file;
     }
     // Assign deferred parent/sibling ownership.
@@ -284,8 +285,9 @@ std::map<u64, VirtualFile> RomFSBuildContext::Build() {
     for (const auto& it : directories) {
         cur_dir = it.second;
         cur_dir->entry_offset = entry_offset;
-        entry_offset += sizeof(RomFSDirectoryEntry) +
-                        Common::AlignUp(cur_dir->path_len - cur_dir->cur_path_ofs, 4);
+        entry_offset +=
+            static_cast<u32>(sizeof(RomFSDirectoryEntry) +
+                             Common::AlignUp(cur_dir->path_len - cur_dir->cur_path_ofs, 4));
     }
     // Assign deferred parent/sibling ownership.
     for (auto it = directories.rbegin(); it->second != root; ++it) {
@@ -294,7 +296,7 @@ std::map<u64, VirtualFile> RomFSBuildContext::Build() {
         cur_dir->parent->child = cur_dir;
     }
 
-    std::map<u64, VirtualFile> out;
+    std::multimap<u64, VirtualFile> out;
 
     // Populate file tables.
     for (const auto& it : files) {

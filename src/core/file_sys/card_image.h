@@ -9,8 +9,11 @@
 #include <vector>
 #include "common/common_types.h"
 #include "common/swap.h"
-#include "core/crypto/key_manager.h"
 #include "core/file_sys/vfs.h"
+
+namespace Core::Crypto {
+class KeyManager;
+}
 
 namespace Loader {
 enum class ResultStatus : u16;
@@ -75,22 +78,34 @@ enum class XCIPartition : u8 { Update, Normal, Secure, Logo };
 
 class XCI : public ReadOnlyVfsDirectory {
 public:
-    explicit XCI(VirtualFile file);
+    explicit XCI(VirtualFile file, std::size_t program_index = 0);
     ~XCI() override;
 
     Loader::ResultStatus GetStatus() const;
     Loader::ResultStatus GetProgramNCAStatus() const;
 
-    u8 GetFormatVersion() const;
+    u8 GetFormatVersion();
 
-    VirtualDir GetPartition(XCIPartition partition) const;
+    VirtualDir GetPartition(XCIPartition partition);
+    std::vector<VirtualDir> GetPartitions();
+
     std::shared_ptr<NSP> GetSecurePartitionNSP() const;
-    VirtualDir GetSecurePartition() const;
-    VirtualDir GetNormalPartition() const;
-    VirtualDir GetUpdatePartition() const;
-    VirtualDir GetLogoPartition() const;
+    VirtualDir GetSecurePartition();
+    VirtualDir GetNormalPartition();
+    VirtualDir GetUpdatePartition();
+    VirtualDir GetLogoPartition();
+
+    VirtualFile GetPartitionRaw(XCIPartition partition) const;
+    VirtualFile GetSecurePartitionRaw() const;
+    VirtualFile GetStoragePartition0() const;
+    VirtualFile GetStoragePartition1() const;
+    VirtualFile GetNormalPartitionRaw() const;
+    VirtualFile GetUpdatePartitionRaw() const;
+    VirtualFile GetLogoPartitionRaw() const;
 
     u64 GetProgramTitleID() const;
+    u32 GetSystemUpdateVersion();
+    u64 GetSystemUpdateTitleID() const;
 
     bool HasProgramNCA() const;
     VirtualFile GetProgramNCAFile() const;
@@ -106,6 +121,11 @@ public:
 
     VirtualDir GetParentDirectory() const override;
 
+    // Creates a directory that contains all the NCAs in the gamecard
+    VirtualDir ConcatenatedPseudoDirectory();
+
+    std::array<u8, 0x200> GetCertificate() const;
+
 private:
     Loader::ResultStatus AddNCAFromPartition(XCIPartition part);
 
@@ -116,10 +136,13 @@ private:
     Loader::ResultStatus program_nca_status;
 
     std::vector<VirtualDir> partitions;
+    std::vector<VirtualFile> partitions_raw;
     std::shared_ptr<NSP> secure_partition;
     std::shared_ptr<NCA> program;
     std::vector<std::shared_ptr<NCA>> ncas;
 
-    Core::Crypto::KeyManager keys;
+    u64 update_normal_partition_end;
+
+    Core::Crypto::KeyManager& keys;
 };
 } // namespace FileSys

@@ -15,6 +15,10 @@
 #include "core/file_sys/control_metadata.h"
 #include "core/file_sys/vfs.h"
 
+namespace Core {
+class System;
+}
+
 namespace FileSys {
 class NACP;
 } // namespace FileSys
@@ -131,6 +135,7 @@ enum class ResultStatus : u16 {
     ErrorINITooManyKIPs,
 };
 
+std::string GetResultStatusString(ResultStatus status);
 std::ostream& operator<<(std::ostream& os, ResultStatus status);
 
 /// Interface for loading an application
@@ -154,9 +159,10 @@ public:
     /**
      * Load the application and return the created Process instance
      * @param process The newly created process.
+     * @param system  The system that this process is being loaded under.
      * @return The status result of the operation.
      */
-    virtual LoadResult Load(Kernel::Process& process) = 0;
+    virtual LoadResult Load(Kernel::Process& process, Core::System& system) = 0;
 
     /**
      * Get the code (typically .code section) of the application
@@ -285,9 +291,14 @@ protected:
 
 /**
  * Identifies a bootable file and return a suitable loader
- * @param file The bootable file
- * @return the best loader for this file
+ *
+ * @param system The system context.
+ * @param file   The bootable file.
+ * @param program_index Specifies the index within the container of the program to launch.
+ *
+ * @return the best loader for this file.
  */
-std::unique_ptr<AppLoader> GetLoader(FileSys::VirtualFile file);
+std::unique_ptr<AppLoader> GetLoader(Core::System& system, FileSys::VirtualFile file,
+                                     std::size_t program_index = 0);
 
 } // namespace Loader

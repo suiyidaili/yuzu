@@ -10,7 +10,7 @@
 #include "common/common_funcs.h"
 #include "common/common_types.h"
 #include "common/swap.h"
-#include "core/file_sys/vfs.h"
+#include "core/file_sys/vfs_types.h"
 
 namespace FileSys {
 
@@ -83,7 +83,7 @@ enum class Language : u8 {
     Italian = 7,
     Dutch = 8,
     CanadianFrench = 9,
-    Portugese = 10,
+    Portuguese = 10,
     Russian = 11,
     Korean = 12,
     Taiwanese = 13,
@@ -113,6 +113,7 @@ public:
     u32 GetSupportedLanguages() const;
     std::vector<u8> GetRawBytes() const;
     bool GetUserAccountSwitchLock() const;
+    u64 GetDeviceSaveDataSize() const;
 
 private:
     RawNACP raw{};

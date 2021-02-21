@@ -21,7 +21,7 @@ u32 ShaderIR::DecodeArithmetic(NodeBlock& bb, u32 pc) {
 
     Node op_a = GetRegister(instr.gpr8);
 
-    Node op_b = [&]() -> Node {
+    Node op_b = [&] {
         if (instr.is_b_imm) {
             return GetImmediate19(instr);
         } else if (instr.is_b_gpr) {
@@ -43,38 +43,33 @@ u32 ShaderIR::DecodeArithmetic(NodeBlock& bb, u32 pc) {
     case OpCode::Id::FMUL_IMM: {
         // FMUL does not have 'abs' bits and only the second operand has a 'neg' bit.
         if (instr.fmul.tab5cb8_2 != 0) {
-            LOG_WARNING(HW_GPU, "FMUL tab5cb8_2({}) is not implemented",
-                        instr.fmul.tab5cb8_2.Value());
+            LOG_DEBUG(HW_GPU, "FMUL tab5cb8_2({}) is not implemented",
+                      instr.fmul.tab5cb8_2.Value());
         }
         if (instr.fmul.tab5c68_0 != 1) {
-            LOG_WARNING(HW_GPU, "FMUL tab5cb8_0({}) is not implemented",
-                        instr.fmul.tab5c68_0.Value());
+            LOG_DEBUG(HW_GPU, "FMUL tab5cb8_0({}) is not implemented",
+                      instr.fmul.tab5c68_0.Value());
         }
 
         op_b = GetOperandAbsNegFloat(op_b, false, instr.fmul.negate_b);
 
-        // TODO(Rodrigo): Should precise be used when there's a postfactor?
-        Node value = Operation(OperationCode::FMul, PRECISE, op_a, op_b);
+        static constexpr std::array FmulPostFactor = {
+            1.000f, // None
+            0.500f, // Divide 2
+            0.250f, // Divide 4
+            0.125f, // Divide 8
+            8.000f, // Mul 8
+            4.000f, // Mul 4
+            2.000f, // Mul 2
+        };
 
         if (instr.fmul.postfactor != 0) {
-            auto postfactor = static_cast<s32>(instr.fmul.postfactor);
-
-            // Postfactor encoded as 3-bit 1's complement in instruction, interpreted with below
-            // logic.
-            if (postfactor >= 4) {
-                postfactor = 7 - postfactor;
-            } else {
-                postfactor = 0 - postfactor;
-            }
-
-            if (postfactor > 0) {
-                value = Operation(OperationCode::FMul, NO_PRECISE, value,
-                                  Immediate(static_cast<f32>(1 << postfactor)));
-            } else {
-                value = Operation(OperationCode::FDiv, NO_PRECISE, value,
-                                  Immediate(static_cast<f32>(1 << -postfactor)));
-            }
+            op_a = Operation(OperationCode::FMul, NO_PRECISE, op_a,
+                             Immediate(FmulPostFactor[instr.fmul.postfactor]));
         }
+
+        // TODO(Rodrigo): Should precise be used when there's a postfactor?
+        Node value = Operation(OperationCode::FMul, PRECISE, op_a, op_b);
 
         value = GetSaturatedFloat(value, instr.alu.saturate_d);
 
@@ -115,8 +110,7 @@ u32 ShaderIR::DecodeArithmetic(NodeBlock& bb, u32 pc) {
             case SubOp::Sqrt:
                 return Operation(OperationCode::FSqrt, PRECISE, op_a);
             default:
-                UNIMPLEMENTED_MSG("Unhandled MUFU sub op={0:x}",
-                                  static_cast<unsigned>(instr.sub_op.Value()));
+                UNIMPLEMENTED_MSG("Unhandled MUFU sub op={0:x}", instr.sub_op.Value());
                 return Immediate(0);
             }
         }();
@@ -141,13 +135,25 @@ u32 ShaderIR::DecodeArithmetic(NodeBlock& bb, u32 pc) {
         SetRegister(bb, instr.gpr0, value);
         break;
     }
+    case OpCode::Id::FCMP_RR:
+    case OpCode::Id::FCMP_RC:
+    case OpCode::Id::FCMP_IMMR: {
+        UNIMPLEMENTED_IF(instr.fcmp.ftz == 0);
+        Node op_c = GetRegister(instr.gpr39);
+        Node comp = GetPredicateComparisonFloat(instr.fcmp.cond, std::move(op_c), Immediate(0.0f));
+        SetRegister(
+            bb, instr.gpr0,
+            Operation(OperationCode::Select, std::move(comp), std::move(op_a), std::move(op_b)));
+        break;
+    }
     case OpCode::Id::RRO_C:
     case OpCode::Id::RRO_R:
     case OpCode::Id::RRO_IMM: {
+        LOG_DEBUG(HW_GPU, "(STUBBED) RRO used");
+
         // Currently RRO is only implemented as a register move.
         op_b = GetOperandAbsNegFloat(op_b, instr.alu.abs_b, instr.alu.negate_b);
         SetRegister(bb, instr.gpr0, op_b);
-        LOG_WARNING(HW_GPU, "RRO instruction is incomplete");
         break;
     }
     default:

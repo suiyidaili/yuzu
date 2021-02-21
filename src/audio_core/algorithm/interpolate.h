@@ -6,19 +6,17 @@
 
 #include <array>
 #include <vector>
-#include "audio_core/algorithm/filter.h"
+
 #include "common/common_types.h"
 
 namespace AudioCore {
 
 struct InterpolationState {
-    static constexpr std::size_t lanczos_taps = 4;
-    static constexpr std::size_t history_size = lanczos_taps * 2 - 1;
-
-    double current_ratio = 0.0;
-    CascadingFilter nyquist;
-    std::array<std::array<s16, 2>, history_size> history = {};
-    double position = 0;
+    static constexpr std::size_t taps{4};
+    static constexpr std::size_t history_size{taps * 2 - 1};
+    std::array<std::array<s16, 2>, history_size> history{};
+    double position{};
+    s32 fraction{};
 };
 
 /// Interpolates input signal to produce output signal.
@@ -39,5 +37,8 @@ inline std::vector<s16> Interpolate(InterpolationState& state, std::vector<s16> 
     const double ratio = static_cast<double>(input_rate) / static_cast<double>(output_rate);
     return Interpolate(state, std::move(input), ratio);
 }
+
+/// Nintendo Switchs DSP resampling algorithm. Based on a single channel
+void Resample(s32* output, const s32* input, s32 pitch, s32& fraction, std::size_t sample_count);
 
 } // namespace AudioCore

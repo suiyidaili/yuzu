@@ -4,10 +4,10 @@
 
 #pragma once
 
-#include <bitset>
 #include <optional>
 #include <string>
 #include <tuple>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -18,175 +18,65 @@
 #include "common/assert.h"
 #include "common/common_types.h"
 #include "core/file_sys/vfs_vector.h"
-#include "video_core/renderer_opengl/gl_shader_gen.h"
+#include "video_core/engines/shader_type.h"
+#include "video_core/shader/registry.h"
 
-namespace Core {
-class System;
-}
-
-namespace FileUtil {
+namespace Common::FS {
 class IOFile;
 }
 
 namespace OpenGL {
 
-struct ShaderDiskCacheUsage;
-struct ShaderDiskCacheDump;
-
 using ProgramCode = std::vector<u64>;
-using ShaderDumpsMap = std::unordered_map<ShaderDiskCacheUsage, ShaderDiskCacheDump>;
-using TextureBufferUsage = std::bitset<64>;
 
-/// Allocated bindings used by an OpenGL shader program
-struct BaseBindings {
-    u32 cbuf{};
-    u32 gmem{};
-    u32 sampler{};
-    u32 image{};
+/// Describes a shader and how it's used by the guest GPU
+struct ShaderDiskCacheEntry {
+    ShaderDiskCacheEntry();
+    ~ShaderDiskCacheEntry();
 
-    bool operator==(const BaseBindings& rhs) const {
-        return std::tie(cbuf, gmem, sampler, image) ==
-               std::tie(rhs.cbuf, rhs.gmem, rhs.sampler, rhs.image);
-    }
+    bool Load(Common::FS::IOFile& file);
 
-    bool operator!=(const BaseBindings& rhs) const {
-        return !operator==(rhs);
-    }
-};
-
-/// Describes the different variants a single program can be compiled.
-struct ProgramVariant {
-    BaseBindings base_bindings;
-    GLenum primitive_mode{};
-    TextureBufferUsage texture_buffer_usage{};
-
-    bool operator==(const ProgramVariant& rhs) const {
-        return std::tie(base_bindings, primitive_mode, texture_buffer_usage) ==
-               std::tie(rhs.base_bindings, rhs.primitive_mode, rhs.texture_buffer_usage);
-    }
-
-    bool operator!=(const ProgramVariant& rhs) const {
-        return !operator==(rhs);
-    }
-};
-
-/// Describes how a shader is used.
-struct ShaderDiskCacheUsage {
-    u64 unique_identifier{};
-    ProgramVariant variant;
-
-    bool operator==(const ShaderDiskCacheUsage& rhs) const {
-        return std::tie(unique_identifier, variant) == std::tie(rhs.unique_identifier, rhs.variant);
-    }
-
-    bool operator!=(const ShaderDiskCacheUsage& rhs) const {
-        return !operator==(rhs);
-    }
-};
-
-} // namespace OpenGL
-
-namespace std {
-
-template <>
-struct hash<OpenGL::BaseBindings> {
-    std::size_t operator()(const OpenGL::BaseBindings& bindings) const noexcept {
-        return static_cast<std::size_t>(bindings.cbuf) ^
-               (static_cast<std::size_t>(bindings.gmem) << 8) ^
-               (static_cast<std::size_t>(bindings.sampler) << 16) ^
-               (static_cast<std::size_t>(bindings.image) << 24);
-    }
-};
-
-template <>
-struct hash<OpenGL::ProgramVariant> {
-    std::size_t operator()(const OpenGL::ProgramVariant& variant) const noexcept {
-        return std::hash<OpenGL::BaseBindings>()(variant.base_bindings) ^
-               std::hash<OpenGL::TextureBufferUsage>()(variant.texture_buffer_usage) ^
-               (static_cast<std::size_t>(variant.primitive_mode) << 6);
-    }
-};
-
-template <>
-struct hash<OpenGL::ShaderDiskCacheUsage> {
-    std::size_t operator()(const OpenGL::ShaderDiskCacheUsage& usage) const noexcept {
-        return static_cast<std::size_t>(usage.unique_identifier) ^
-               std::hash<OpenGL::ProgramVariant>()(usage.variant);
-    }
-};
-
-} // namespace std
-
-namespace OpenGL {
-
-/// Describes a shader how it's used by the guest GPU
-class ShaderDiskCacheRaw {
-public:
-    explicit ShaderDiskCacheRaw(u64 unique_identifier, ProgramType program_type,
-                                u32 program_code_size, u32 program_code_size_b,
-                                ProgramCode program_code, ProgramCode program_code_b);
-    ShaderDiskCacheRaw();
-    ~ShaderDiskCacheRaw();
-
-    bool Load(FileUtil::IOFile& file);
-
-    bool Save(FileUtil::IOFile& file) const;
-
-    u64 GetUniqueIdentifier() const {
-        return unique_identifier;
-    }
+    bool Save(Common::FS::IOFile& file) const;
 
     bool HasProgramA() const {
-        return program_type == ProgramType::VertexA;
+        return !code.empty() && !code_b.empty();
     }
 
-    ProgramType GetProgramType() const {
-        return program_type;
-    }
+    Tegra::Engines::ShaderType type{};
+    ProgramCode code;
+    ProgramCode code_b;
 
-    const ProgramCode& GetProgramCode() const {
-        return program_code;
-    }
-
-    const ProgramCode& GetProgramCodeB() const {
-        return program_code_b;
-    }
-
-private:
-    u64 unique_identifier{};
-    ProgramType program_type{};
-    u32 program_code_size{};
-    u32 program_code_size_b{};
-
-    ProgramCode program_code;
-    ProgramCode program_code_b;
-};
-
-/// Contains decompiled data from a shader
-struct ShaderDiskCacheDecompiled {
-    std::string code;
-    GLShader::ShaderEntries entries;
+    u64 unique_identifier = 0;
+    std::optional<u32> texture_handler_size;
+    u32 bound_buffer = 0;
+    VideoCommon::Shader::GraphicsInfo graphics_info;
+    VideoCommon::Shader::ComputeInfo compute_info;
+    VideoCommon::Shader::KeyMap keys;
+    VideoCommon::Shader::BoundSamplerMap bound_samplers;
+    VideoCommon::Shader::SeparateSamplerMap separate_samplers;
+    VideoCommon::Shader::BindlessSamplerMap bindless_samplers;
 };
 
 /// Contains an OpenGL dumped binary program
-struct ShaderDiskCacheDump {
-    GLenum binary_format;
+struct ShaderDiskCachePrecompiled {
+    u64 unique_identifier = 0;
+    GLenum binary_format = 0;
     std::vector<u8> binary;
 };
 
 class ShaderDiskCacheOpenGL {
 public:
-    explicit ShaderDiskCacheOpenGL(Core::System& system);
+    explicit ShaderDiskCacheOpenGL();
     ~ShaderDiskCacheOpenGL();
 
+    /// Binds a title ID for all future operations.
+    void BindTitleID(u64 title_id);
+
     /// Loads transferable cache. If file has a old version or on failure, it deletes the file.
-    std::optional<std::pair<std::vector<ShaderDiskCacheRaw>, std::vector<ShaderDiskCacheUsage>>>
-    LoadTransferable();
+    std::optional<std::vector<ShaderDiskCacheEntry>> LoadTransferable();
 
     /// Loads current game's precompiled cache. Invalidates on failure.
-    std::pair<std::unordered_map<u64, ShaderDiskCacheDecompiled>,
-              std::unordered_map<ShaderDiskCacheUsage, ShaderDiskCacheDump>>
-    LoadPrecompiled();
+    std::vector<ShaderDiskCachePrecompiled> LoadPrecompiled();
 
     /// Removes the transferable (and precompiled) cache file.
     void InvalidateTransferable();
@@ -195,40 +85,21 @@ public:
     void InvalidatePrecompiled();
 
     /// Saves a raw dump to the transferable file. Checks for collisions.
-    void SaveRaw(const ShaderDiskCacheRaw& entry);
-
-    /// Saves shader usage to the transferable file. Does not check for collisions.
-    void SaveUsage(const ShaderDiskCacheUsage& usage);
-
-    /// Saves a decompiled entry to the precompiled file. Does not check for collisions.
-    void SaveDecompiled(u64 unique_identifier, const std::string& code,
-                        const GLShader::ShaderEntries& entries);
+    void SaveEntry(const ShaderDiskCacheEntry& entry);
 
     /// Saves a dump entry to the precompiled file. Does not check for collisions.
-    void SaveDump(const ShaderDiskCacheUsage& usage, GLuint program);
+    void SavePrecompiled(u64 unique_identifier, GLuint program);
 
     /// Serializes virtual precompiled shader cache file to real file
     void SaveVirtualPrecompiledFile();
 
 private:
     /// Loads the transferable cache. Returns empty on failure.
-    std::optional<std::pair<std::unordered_map<u64, ShaderDiskCacheDecompiled>,
-                            std::unordered_map<ShaderDiskCacheUsage, ShaderDiskCacheDump>>>
-    LoadPrecompiledFile(FileUtil::IOFile& file);
-
-    /// Loads a decompiled cache entry from m_precompiled_cache_virtual_file. Returns empty on
-    /// failure.
-    std::optional<ShaderDiskCacheDecompiled> LoadDecompiledEntry();
-
-    /// Saves a decompiled entry to the passed file. Returns true on success.
-    bool SaveDecompiledFile(u64 unique_identifier, const std::string& code,
-                            const GLShader::ShaderEntries& entries);
-
-    /// Returns if the cache can be used
-    bool IsUsable() const;
+    std::optional<std::vector<ShaderDiskCachePrecompiled>> LoadPrecompiledFile(
+        Common::FS::IOFile& file);
 
     /// Opens current game's transferable file and write it's header if it doesn't exist
-    FileUtil::IOFile AppendTransferableFile() const;
+    Common::FS::IOFile AppendTransferableFile() const;
 
     /// Save precompiled header to precompiled_cache_in_memory
     void SavePrecompiledHeaderToVirtualPrecompiledCache();
@@ -285,8 +156,6 @@ private:
         return LoadArrayFromPrecompiled(&object, 1);
     }
 
-    Core::System& system;
-
     // Stores whole precompiled cache which will be read from or saved to the precompiled chache
     // file
     FileSys::VectorVfsFile precompiled_cache_virtual_file;
@@ -294,10 +163,13 @@ private:
     std::size_t precompiled_cache_virtual_file_offset = 0;
 
     // Stored transferable shaders
-    std::unordered_map<u64, std::unordered_set<ShaderDiskCacheUsage>> transferable;
+    std::unordered_set<u64> stored_transferable;
+
+    /// Title ID to operate on
+    u64 title_id = 0;
 
     // The cache has been loaded at boot
-    bool tried_to_load{};
+    bool is_usable = false;
 };
 
 } // namespace OpenGL

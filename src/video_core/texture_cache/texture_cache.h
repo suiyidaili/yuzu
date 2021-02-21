@@ -6,830 +6,1446 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <memory>
 #include <mutex>
-#include <set>
-#include <tuple>
+#include <optional>
+#include <span>
+#include <type_traits>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
-#include <boost/icl/interval_map.hpp>
-#include <boost/range/iterator_range.hpp>
+#include <boost/container/small_vector.hpp>
 
-#include "common/assert.h"
+#include "common/alignment.h"
+#include "common/common_funcs.h"
 #include "common/common_types.h"
-#include "common/math_util.h"
-#include "core/core.h"
-#include "core/memory.h"
-#include "core/settings.h"
+#include "common/logging/log.h"
+#include "video_core/compatible_formats.h"
+#include "video_core/delayed_destruction_ring.h"
+#include "video_core/dirty_flags.h"
 #include "video_core/engines/fermi_2d.h"
+#include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
-#include "video_core/gpu.h"
 #include "video_core/memory_manager.h"
 #include "video_core/rasterizer_interface.h"
 #include "video_core/surface.h"
-#include "video_core/texture_cache/copy_params.h"
-#include "video_core/texture_cache/surface_base.h"
-#include "video_core/texture_cache/surface_params.h"
-#include "video_core/texture_cache/surface_view.h"
-
-namespace Tegra::Texture {
-struct FullTextureInfo;
-}
-
-namespace VideoCore {
-class RasterizerInterface;
-}
+#include "video_core/texture_cache/descriptor_table.h"
+#include "video_core/texture_cache/format_lookup_table.h"
+#include "video_core/texture_cache/formatter.h"
+#include "video_core/texture_cache/image_base.h"
+#include "video_core/texture_cache/image_info.h"
+#include "video_core/texture_cache/image_view_base.h"
+#include "video_core/texture_cache/image_view_info.h"
+#include "video_core/texture_cache/render_targets.h"
+#include "video_core/texture_cache/samples_helper.h"
+#include "video_core/texture_cache/slot_vector.h"
+#include "video_core/texture_cache/types.h"
+#include "video_core/texture_cache/util.h"
+#include "video_core/textures/texture.h"
 
 namespace VideoCommon {
 
+using Tegra::Texture::SwizzleSource;
+using Tegra::Texture::TextureType;
+using Tegra::Texture::TICEntry;
+using Tegra::Texture::TSCEntry;
+using VideoCore::Surface::GetFormatType;
+using VideoCore::Surface::IsCopyCompatible;
 using VideoCore::Surface::PixelFormat;
+using VideoCore::Surface::PixelFormatFromDepthFormat;
+using VideoCore::Surface::PixelFormatFromRenderTargetFormat;
+using VideoCore::Surface::SurfaceType;
 
-using VideoCore::Surface::SurfaceTarget;
-using RenderTargetConfig = Tegra::Engines::Maxwell3D::Regs::RenderTargetConfig;
-
-template <typename TSurface, typename TView>
+template <class P>
 class TextureCache {
-    using IntervalMap = boost::icl::interval_map<CacheAddr, std::set<TSurface>>;
-    using IntervalType = typename IntervalMap::interval_type;
+    /// Address shift for caching images into a hash table
+    static constexpr u64 PAGE_BITS = 20;
+
+    /// Enables debugging features to the texture cache
+    static constexpr bool ENABLE_VALIDATION = P::ENABLE_VALIDATION;
+    /// Implement blits as copies between framebuffers
+    static constexpr bool FRAMEBUFFER_BLITS = P::FRAMEBUFFER_BLITS;
+    /// True when some copies have to be emulated
+    static constexpr bool HAS_EMULATED_COPIES = P::HAS_EMULATED_COPIES;
+
+    /// Image view ID for null descriptors
+    static constexpr ImageViewId NULL_IMAGE_VIEW_ID{0};
+    /// Sampler ID for bugged sampler ids
+    static constexpr SamplerId NULL_SAMPLER_ID{0};
+
+    using Runtime = typename P::Runtime;
+    using Image = typename P::Image;
+    using ImageAlloc = typename P::ImageAlloc;
+    using ImageView = typename P::ImageView;
+    using Sampler = typename P::Sampler;
+    using Framebuffer = typename P::Framebuffer;
+
+    struct BlitImages {
+        ImageId dst_id;
+        ImageId src_id;
+        PixelFormat dst_format;
+        PixelFormat src_format;
+    };
+
+    template <typename T>
+    struct IdentityHash {
+        [[nodiscard]] size_t operator()(T value) const noexcept {
+            return static_cast<size_t>(value);
+        }
+    };
 
 public:
-    void InvalidateRegion(CacheAddr addr, std::size_t size) {
-        std::lock_guard lock{mutex};
+    explicit TextureCache(Runtime&, VideoCore::RasterizerInterface&, Tegra::Engines::Maxwell3D&,
+                          Tegra::Engines::KeplerCompute&, Tegra::MemoryManager&);
 
-        for (const auto& surface : GetSurfacesInRegion(addr, size)) {
-            Unregister(surface);
-        }
-    }
+    /// Notify the cache that a new frame has been queued
+    void TickFrame();
 
-    /***
-     * `Guard` guarantees that rendertargets don't unregister themselves if the
-     * collide. Protection is currently only done on 3D slices.
-     ***/
-    void GuardRenderTargets(bool new_guard) {
-        guard_render_targets = new_guard;
-    }
+    /// Return a constant reference to the given image view id
+    [[nodiscard]] const ImageView& GetImageView(ImageViewId id) const noexcept;
 
-    void GuardSamplers(bool new_guard) {
-        guard_samplers = new_guard;
-    }
+    /// Return a reference to the given image view id
+    [[nodiscard]] ImageView& GetImageView(ImageViewId id) noexcept;
 
-    void FlushRegion(CacheAddr addr, std::size_t size) {
-        std::lock_guard lock{mutex};
+    /// Fill image_view_ids with the graphics images in indices
+    void FillGraphicsImageViews(std::span<const u32> indices,
+                                std::span<ImageViewId> image_view_ids);
 
-        auto surfaces = GetSurfacesInRegion(addr, size);
-        if (surfaces.empty()) {
-            return;
-        }
-        std::sort(surfaces.begin(), surfaces.end(), [](const TSurface& a, const TSurface& b) {
-            return a->GetModificationTick() < b->GetModificationTick();
-        });
-        for (const auto& surface : surfaces) {
-            FlushSurface(surface);
-        }
-    }
+    /// Fill image_view_ids with the compute images in indices
+    void FillComputeImageViews(std::span<const u32> indices, std::span<ImageViewId> image_view_ids);
 
-    TView GetTextureSurface(const Tegra::Texture::TICEntry& tic,
-                            const VideoCommon::Shader::Sampler& entry) {
-        std::lock_guard lock{mutex};
-        const auto gpu_addr{tic.Address()};
-        if (!gpu_addr) {
-            return {};
-        }
-        const auto params{SurfaceParams::CreateForTexture(tic, entry)};
-        const auto [surface, view] = GetSurface(gpu_addr, params, true, false);
-        if (guard_samplers) {
-            sampled_textures.push_back(surface);
-        }
-        return view;
-    }
+    /// Get the sampler from the graphics descriptor table in the specified index
+    Sampler* GetGraphicsSampler(u32 index);
 
-    TView GetImageSurface(const Tegra::Texture::TICEntry& tic,
-                          const VideoCommon::Shader::Image& entry) {
-        std::lock_guard lock{mutex};
-        const auto gpu_addr{tic.Address()};
-        if (!gpu_addr) {
-            return {};
-        }
-        const auto params{SurfaceParams::CreateForImage(tic, entry)};
-        const auto [surface, view] = GetSurface(gpu_addr, params, true, false);
-        if (guard_samplers) {
-            sampled_textures.push_back(surface);
-        }
-        return view;
-    }
+    /// Get the sampler from the compute descriptor table in the specified index
+    Sampler* GetComputeSampler(u32 index);
 
-    bool TextureBarrier() {
-        const bool any_rt =
-            std::any_of(sampled_textures.begin(), sampled_textures.end(),
-                        [](const auto& surface) { return surface->IsRenderTarget(); });
-        sampled_textures.clear();
-        return any_rt;
-    }
+    /// Refresh the state for graphics image view and sampler descriptors
+    void SynchronizeGraphicsDescriptors();
 
-    TView GetDepthBufferSurface(bool preserve_contents) {
-        std::lock_guard lock{mutex};
-        auto& maxwell3d = system.GPU().Maxwell3D();
+    /// Refresh the state for compute image view and sampler descriptors
+    void SynchronizeComputeDescriptors();
 
-        if (!maxwell3d.dirty.depth_buffer) {
-            return depth_buffer.view;
-        }
-        maxwell3d.dirty.depth_buffer = false;
+    /// Update bound render targets and upload memory if necessary
+    /// @param is_clear True when the render targets are being used for clears
+    void UpdateRenderTargets(bool is_clear);
 
-        const auto& regs{maxwell3d.regs};
-        const auto gpu_addr{regs.zeta.Address()};
-        if (!gpu_addr || !regs.zeta_enable) {
-            SetEmptyDepthBuffer();
-            return {};
-        }
-        const auto depth_params{SurfaceParams::CreateForDepthBuffer(
-            system, regs.zeta_width, regs.zeta_height, regs.zeta.format,
-            regs.zeta.memory_layout.block_width, regs.zeta.memory_layout.block_height,
-            regs.zeta.memory_layout.block_depth, regs.zeta.memory_layout.type)};
-        auto surface_view = GetSurface(gpu_addr, depth_params, preserve_contents, true);
-        if (depth_buffer.target)
-            depth_buffer.target->MarkAsRenderTarget(false, NO_RT);
-        depth_buffer.target = surface_view.first;
-        depth_buffer.view = surface_view.second;
-        if (depth_buffer.target)
-            depth_buffer.target->MarkAsRenderTarget(true, DEPTH_RT);
-        return surface_view.second;
-    }
+    /// Find a framebuffer with the currently bound render targets
+    /// UpdateRenderTargets should be called before this
+    Framebuffer* GetFramebuffer();
 
-    TView GetColorBufferSurface(std::size_t index, bool preserve_contents) {
-        std::lock_guard lock{mutex};
-        ASSERT(index < Tegra::Engines::Maxwell3D::Regs::NumRenderTargets);
-        auto& maxwell3d = system.GPU().Maxwell3D();
-        if (!maxwell3d.dirty.render_target[index]) {
-            return render_targets[index].view;
-        }
-        maxwell3d.dirty.render_target[index] = false;
+    /// Mark images in a range as modified from the CPU
+    void WriteMemory(VAddr cpu_addr, size_t size);
 
-        const auto& regs{maxwell3d.regs};
-        if (index >= regs.rt_control.count || regs.rt[index].Address() == 0 ||
-            regs.rt[index].format == Tegra::RenderTargetFormat::NONE) {
-            SetEmptyColorBuffer(index);
-            return {};
-        }
+    /// Download contents of host images to guest memory in a region
+    void DownloadMemory(VAddr cpu_addr, size_t size);
 
-        const auto& config{regs.rt[index]};
-        const auto gpu_addr{config.Address()};
-        if (!gpu_addr) {
-            SetEmptyColorBuffer(index);
-            return {};
-        }
+    /// Remove images in a region
+    void UnmapMemory(VAddr cpu_addr, size_t size);
 
-        auto surface_view = GetSurface(gpu_addr, SurfaceParams::CreateForFramebuffer(system, index),
-                                       preserve_contents, true);
-        if (render_targets[index].target)
-            render_targets[index].target->MarkAsRenderTarget(false, NO_RT);
-        render_targets[index].target = surface_view.first;
-        render_targets[index].view = surface_view.second;
-        if (render_targets[index].target)
-            render_targets[index].target->MarkAsRenderTarget(true, static_cast<u32>(index));
-        return surface_view.second;
-    }
+    /// Blit an image with the given parameters
+    void BlitImage(const Tegra::Engines::Fermi2D::Surface& dst,
+                   const Tegra::Engines::Fermi2D::Surface& src,
+                   const Tegra::Engines::Fermi2D::Config& copy);
 
-    void MarkColorBufferInUse(std::size_t index) {
-        if (auto& render_target = render_targets[index].target) {
-            render_target->MarkAsModified(true, Tick());
-        }
-    }
+    /// Invalidate the contents of the color buffer index
+    /// These contents become unspecified, the cache can assume aggressive optimizations.
+    void InvalidateColorBuffer(size_t index);
 
-    void MarkDepthBufferInUse() {
-        if (depth_buffer.target) {
-            depth_buffer.target->MarkAsModified(true, Tick());
-        }
-    }
+    /// Invalidate the contents of the depth buffer
+    /// These contents become unspecified, the cache can assume aggressive optimizations.
+    void InvalidateDepthBuffer();
 
-    void SetEmptyDepthBuffer() {
-        if (depth_buffer.target == nullptr) {
-            return;
-        }
-        depth_buffer.target->MarkAsRenderTarget(false, NO_RT);
-        depth_buffer.target = nullptr;
-        depth_buffer.view = nullptr;
-    }
+    /// Try to find a cached image view in the given CPU address
+    [[nodiscard]] ImageView* TryFindFramebufferImageView(VAddr cpu_addr);
 
-    void SetEmptyColorBuffer(std::size_t index) {
-        if (render_targets[index].target == nullptr) {
-            return;
-        }
-        render_targets[index].target->MarkAsRenderTarget(false, NO_RT);
-        render_targets[index].target = nullptr;
-        render_targets[index].view = nullptr;
-    }
+    /// Return true when there are uncommitted images to be downloaded
+    [[nodiscard]] bool HasUncommittedFlushes() const noexcept;
 
-    void DoFermiCopy(const Tegra::Engines::Fermi2D::Regs::Surface& src_config,
-                     const Tegra::Engines::Fermi2D::Regs::Surface& dst_config,
-                     const Tegra::Engines::Fermi2D::Config& copy_config) {
-        std::lock_guard lock{mutex};
-        std::pair<TSurface, TView> dst_surface = GetFermiSurface(dst_config);
-        std::pair<TSurface, TView> src_surface = GetFermiSurface(src_config);
-        ImageBlit(src_surface.second, dst_surface.second, copy_config);
-        dst_surface.first->MarkAsModified(true, Tick());
-    }
+    /// Return true when the caller should wait for async downloads
+    [[nodiscard]] bool ShouldWaitAsyncFlushes() const noexcept;
 
-    TSurface TryFindFramebufferSurface(const u8* host_ptr) {
-        const CacheAddr cache_addr = ToCacheAddr(host_ptr);
-        if (!cache_addr) {
-            return nullptr;
-        }
-        const CacheAddr page = cache_addr >> registry_page_bits;
-        std::vector<TSurface>& list = registry[page];
-        for (auto& surface : list) {
-            if (surface->GetCacheAddr() == cache_addr) {
-                return surface;
-            }
-        }
-        return nullptr;
-    }
+    /// Commit asynchronous downloads
+    void CommitAsyncFlushes();
 
-    u64 Tick() {
-        return ++ticks;
-    }
+    /// Pop asynchronous downloads
+    void PopAsyncFlushes();
 
-protected:
-    TextureCache(Core::System& system, VideoCore::RasterizerInterface& rasterizer)
-        : system{system}, rasterizer{rasterizer} {
-        for (std::size_t i = 0; i < Tegra::Engines::Maxwell3D::Regs::NumRenderTargets; i++) {
-            SetEmptyColorBuffer(i);
-        }
+    /// Return true when a CPU region is modified from the GPU
+    [[nodiscard]] bool IsRegionGpuModified(VAddr addr, size_t size);
 
-        SetEmptyDepthBuffer();
-        staging_cache.SetSize(2);
-
-        const auto make_siblings = [this](PixelFormat a, PixelFormat b) {
-            siblings_table[static_cast<std::size_t>(a)] = b;
-            siblings_table[static_cast<std::size_t>(b)] = a;
-        };
-        std::fill(siblings_table.begin(), siblings_table.end(), PixelFormat::Invalid);
-        make_siblings(PixelFormat::Z16, PixelFormat::R16U);
-        make_siblings(PixelFormat::Z32F, PixelFormat::R32F);
-        make_siblings(PixelFormat::Z32FS8, PixelFormat::RG32F);
-
-        sampled_textures.reserve(64);
-    }
-
-    ~TextureCache() = default;
-
-    virtual TSurface CreateSurface(GPUVAddr gpu_addr, const SurfaceParams& params) = 0;
-
-    virtual void ImageCopy(TSurface& src_surface, TSurface& dst_surface,
-                           const CopyParams& copy_params) = 0;
-
-    virtual void ImageBlit(TView& src_view, TView& dst_view,
-                           const Tegra::Engines::Fermi2D::Config& copy_config) = 0;
-
-    // Depending on the backend, a buffer copy can be slow as it means deoptimizing the texture
-    // and reading it from a sepparate buffer.
-    virtual void BufferCopy(TSurface& src_surface, TSurface& dst_surface) = 0;
-
-    void ManageRenderTargetUnregister(TSurface& surface) {
-        auto& maxwell3d = system.GPU().Maxwell3D();
-        const u32 index = surface->GetRenderTarget();
-        if (index == DEPTH_RT) {
-            maxwell3d.dirty.depth_buffer = true;
-        } else {
-            maxwell3d.dirty.render_target[index] = true;
-        }
-        maxwell3d.dirty.render_settings = true;
-    }
-
-    void Register(TSurface surface) {
-        const GPUVAddr gpu_addr = surface->GetGpuAddr();
-        const CacheAddr cache_ptr = ToCacheAddr(system.GPU().MemoryManager().GetPointer(gpu_addr));
-        const std::size_t size = surface->GetSizeInBytes();
-        const std::optional<VAddr> cpu_addr =
-            system.GPU().MemoryManager().GpuToCpuAddress(gpu_addr);
-        if (!cache_ptr || !cpu_addr) {
-            LOG_CRITICAL(HW_GPU, "Failed to register surface with unmapped gpu_address 0x{:016x}",
-                         gpu_addr);
-            return;
-        }
-        const bool continuous = system.GPU().MemoryManager().IsBlockContinuous(gpu_addr, size);
-        surface->MarkAsContinuous(continuous);
-        surface->SetCacheAddr(cache_ptr);
-        surface->SetCpuAddr(*cpu_addr);
-        RegisterInnerCache(surface);
-        surface->MarkAsRegistered(true);
-        rasterizer.UpdatePagesCachedCount(*cpu_addr, size, 1);
-    }
-
-    void Unregister(TSurface surface) {
-        if (guard_render_targets && surface->IsProtected()) {
-            return;
-        }
-        if (!guard_render_targets && surface->IsRenderTarget()) {
-            ManageRenderTargetUnregister(surface);
-        }
-        const std::size_t size = surface->GetSizeInBytes();
-        const VAddr cpu_addr = surface->GetCpuAddr();
-        rasterizer.UpdatePagesCachedCount(cpu_addr, size, -1);
-        UnregisterInnerCache(surface);
-        surface->MarkAsRegistered(false);
-        ReserveSurface(surface->GetSurfaceParams(), surface);
-    }
-
-    TSurface GetUncachedSurface(const GPUVAddr gpu_addr, const SurfaceParams& params) {
-        if (const auto surface = TryGetReservedSurface(params); surface) {
-            surface->SetGpuAddr(gpu_addr);
-            return surface;
-        }
-        // No reserved surface available, create a new one and reserve it
-        auto new_surface{CreateSurface(gpu_addr, params)};
-        return new_surface;
-    }
-
-    std::pair<TSurface, TView> GetFermiSurface(
-        const Tegra::Engines::Fermi2D::Regs::Surface& config) {
-        SurfaceParams params = SurfaceParams::CreateForFermiCopySurface(config);
-        const GPUVAddr gpu_addr = config.Address();
-        return GetSurface(gpu_addr, params, true, false);
-    }
-
-    Core::System& system;
+    std::mutex mutex;
 
 private:
-    enum class RecycleStrategy : u32 {
-        Ignore = 0,
-        Flush = 1,
-        BufferCopy = 3,
+    /// Iterate over all page indices in a range
+    template <typename Func>
+    static void ForEachPage(VAddr addr, size_t size, Func&& func) {
+        static constexpr bool RETURNS_BOOL = std::is_same_v<std::invoke_result<Func, u64>, bool>;
+        const u64 page_end = (addr + size - 1) >> PAGE_BITS;
+        for (u64 page = addr >> PAGE_BITS; page <= page_end; ++page) {
+            if constexpr (RETURNS_BOOL) {
+                if (func(page)) {
+                    break;
+                }
+            } else {
+                func(page);
+            }
+        }
+    }
+
+    /// Fills image_view_ids in the image views in indices
+    void FillImageViews(DescriptorTable<TICEntry>& table,
+                        std::span<ImageViewId> cached_image_view_ids, std::span<const u32> indices,
+                        std::span<ImageViewId> image_view_ids);
+
+    /// Find or create an image view in the guest descriptor table
+    ImageViewId VisitImageView(DescriptorTable<TICEntry>& table,
+                               std::span<ImageViewId> cached_image_view_ids, u32 index);
+
+    /// Find or create a framebuffer with the given render target parameters
+    FramebufferId GetFramebufferId(const RenderTargets& key);
+
+    /// Refresh the contents (pixel data) of an image
+    void RefreshContents(Image& image);
+
+    /// Upload data from guest to an image
+    template <typename StagingBuffer>
+    void UploadImageContents(Image& image, StagingBuffer& staging_buffer);
+
+    /// Find or create an image view from a guest descriptor
+    [[nodiscard]] ImageViewId FindImageView(const TICEntry& config);
+
+    /// Create a new image view from a guest descriptor
+    [[nodiscard]] ImageViewId CreateImageView(const TICEntry& config);
+
+    /// Find or create an image from the given parameters
+    [[nodiscard]] ImageId FindOrInsertImage(const ImageInfo& info, GPUVAddr gpu_addr,
+                                            RelaxedOptions options = RelaxedOptions{});
+
+    /// Find an image from the given parameters
+    [[nodiscard]] ImageId FindImage(const ImageInfo& info, GPUVAddr gpu_addr,
+                                    RelaxedOptions options);
+
+    /// Create an image from the given parameters
+    [[nodiscard]] ImageId InsertImage(const ImageInfo& info, GPUVAddr gpu_addr,
+                                      RelaxedOptions options);
+
+    /// Create a new image and join perfectly matching existing images
+    /// Remove joined images from the cache
+    [[nodiscard]] ImageId JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, VAddr cpu_addr);
+
+    /// Return a blit image pair from the given guest blit parameters
+    [[nodiscard]] BlitImages GetBlitImages(const Tegra::Engines::Fermi2D::Surface& dst,
+                                           const Tegra::Engines::Fermi2D::Surface& src);
+
+    /// Find or create a sampler from a guest descriptor sampler
+    [[nodiscard]] SamplerId FindSampler(const TSCEntry& config);
+
+    /// Find or create an image view for the given color buffer index
+    [[nodiscard]] ImageViewId FindColorBuffer(size_t index, bool is_clear);
+
+    /// Find or create an image view for the depth buffer
+    [[nodiscard]] ImageViewId FindDepthBuffer(bool is_clear);
+
+    /// Find or create a view for a render target with the given image parameters
+    [[nodiscard]] ImageViewId FindRenderTargetView(const ImageInfo& info, GPUVAddr gpu_addr,
+                                                   bool is_clear);
+
+    /// Iterates over all the images in a region calling func
+    template <typename Func>
+    void ForEachImageInRegion(VAddr cpu_addr, size_t size, Func&& func);
+
+    /// Find or create an image view in the given image with the passed parameters
+    [[nodiscard]] ImageViewId FindOrEmplaceImageView(ImageId image_id, const ImageViewInfo& info);
+
+    /// Register image in the page table
+    void RegisterImage(ImageId image);
+
+    /// Unregister image from the page table
+    void UnregisterImage(ImageId image);
+
+    /// Track CPU reads and writes for image
+    void TrackImage(ImageBase& image);
+
+    /// Stop tracking CPU reads and writes for image
+    void UntrackImage(ImageBase& image);
+
+    /// Delete image from the cache
+    void DeleteImage(ImageId image);
+
+    /// Remove image views references from the cache
+    void RemoveImageViewReferences(std::span<const ImageViewId> removed_views);
+
+    /// Remove framebuffers using the given image views from the cache
+    void RemoveFramebuffers(std::span<const ImageViewId> removed_views);
+
+    /// Mark an image as modified from the GPU
+    void MarkModification(ImageBase& image) noexcept;
+
+    /// Synchronize image aliases, copying data if needed
+    void SynchronizeAliases(ImageId image_id);
+
+    /// Prepare an image to be used
+    void PrepareImage(ImageId image_id, bool is_modification, bool invalidate);
+
+    /// Prepare an image view to be used
+    void PrepareImageView(ImageViewId image_view_id, bool is_modification, bool invalidate);
+
+    /// Execute copies from one image to the other, even if they are incompatible
+    void CopyImage(ImageId dst_id, ImageId src_id, std::span<const ImageCopy> copies);
+
+    /// Bind an image view as render target, downloading resources preemtively if needed
+    void BindRenderTarget(ImageViewId* old_id, ImageViewId new_id);
+
+    /// Create a render target from a given image and image view parameters
+    [[nodiscard]] std::pair<FramebufferId, ImageViewId> RenderTargetFromImage(
+        ImageId, const ImageViewInfo& view_info);
+
+    /// Returns true if the current clear parameters clear the whole image of a given image view
+    [[nodiscard]] bool IsFullClear(ImageViewId id);
+
+    Runtime& runtime;
+    VideoCore::RasterizerInterface& rasterizer;
+    Tegra::Engines::Maxwell3D& maxwell3d;
+    Tegra::Engines::KeplerCompute& kepler_compute;
+    Tegra::MemoryManager& gpu_memory;
+
+    DescriptorTable<TICEntry> graphics_image_table{gpu_memory};
+    DescriptorTable<TSCEntry> graphics_sampler_table{gpu_memory};
+    std::vector<SamplerId> graphics_sampler_ids;
+    std::vector<ImageViewId> graphics_image_view_ids;
+
+    DescriptorTable<TICEntry> compute_image_table{gpu_memory};
+    DescriptorTable<TSCEntry> compute_sampler_table{gpu_memory};
+    std::vector<SamplerId> compute_sampler_ids;
+    std::vector<ImageViewId> compute_image_view_ids;
+
+    RenderTargets render_targets;
+
+    std::unordered_map<TICEntry, ImageViewId> image_views;
+    std::unordered_map<TSCEntry, SamplerId> samplers;
+    std::unordered_map<RenderTargets, FramebufferId> framebuffers;
+
+    std::unordered_map<u64, std::vector<ImageId>, IdentityHash<u64>> page_table;
+
+    bool has_deleted_images = false;
+
+    SlotVector<Image> slot_images;
+    SlotVector<ImageView> slot_image_views;
+    SlotVector<ImageAlloc> slot_image_allocs;
+    SlotVector<Sampler> slot_samplers;
+    SlotVector<Framebuffer> slot_framebuffers;
+
+    // TODO: This data structure is not optimal and it should be reworked
+    std::vector<ImageId> uncommitted_downloads;
+    std::queue<std::vector<ImageId>> committed_downloads;
+
+    static constexpr size_t TICKS_TO_DESTROY = 6;
+    DelayedDestructionRing<Image, TICKS_TO_DESTROY> sentenced_images;
+    DelayedDestructionRing<ImageView, TICKS_TO_DESTROY> sentenced_image_view;
+    DelayedDestructionRing<Framebuffer, TICKS_TO_DESTROY> sentenced_framebuffers;
+
+    std::unordered_map<GPUVAddr, ImageAllocId> image_allocs_table;
+
+    u64 modification_tick = 0;
+    u64 frame_tick = 0;
+};
+
+template <class P>
+TextureCache<P>::TextureCache(Runtime& runtime_, VideoCore::RasterizerInterface& rasterizer_,
+                              Tegra::Engines::Maxwell3D& maxwell3d_,
+                              Tegra::Engines::KeplerCompute& kepler_compute_,
+                              Tegra::MemoryManager& gpu_memory_)
+    : runtime{runtime_}, rasterizer{rasterizer_}, maxwell3d{maxwell3d_},
+      kepler_compute{kepler_compute_}, gpu_memory{gpu_memory_} {
+    // Configure null sampler
+    TSCEntry sampler_descriptor{};
+    sampler_descriptor.min_filter.Assign(Tegra::Texture::TextureFilter::Linear);
+    sampler_descriptor.mag_filter.Assign(Tegra::Texture::TextureFilter::Linear);
+    sampler_descriptor.mipmap_filter.Assign(Tegra::Texture::TextureMipmapFilter::Linear);
+    sampler_descriptor.cubemap_anisotropy.Assign(1);
+
+    // Make sure the first index is reserved for the null resources
+    // This way the null resource becomes a compile time constant
+    void(slot_image_views.insert(runtime, NullImageParams{}));
+    void(slot_samplers.insert(runtime, sampler_descriptor));
+}
+
+template <class P>
+void TextureCache<P>::TickFrame() {
+    // Tick sentenced resources in this order to ensure they are destroyed in the right order
+    sentenced_images.Tick();
+    sentenced_framebuffers.Tick();
+    sentenced_image_view.Tick();
+    ++frame_tick;
+}
+
+template <class P>
+const typename P::ImageView& TextureCache<P>::GetImageView(ImageViewId id) const noexcept {
+    return slot_image_views[id];
+}
+
+template <class P>
+typename P::ImageView& TextureCache<P>::GetImageView(ImageViewId id) noexcept {
+    return slot_image_views[id];
+}
+
+template <class P>
+void TextureCache<P>::FillGraphicsImageViews(std::span<const u32> indices,
+                                             std::span<ImageViewId> image_view_ids) {
+    FillImageViews(graphics_image_table, graphics_image_view_ids, indices, image_view_ids);
+}
+
+template <class P>
+void TextureCache<P>::FillComputeImageViews(std::span<const u32> indices,
+                                            std::span<ImageViewId> image_view_ids) {
+    FillImageViews(compute_image_table, compute_image_view_ids, indices, image_view_ids);
+}
+
+template <class P>
+typename P::Sampler* TextureCache<P>::GetGraphicsSampler(u32 index) {
+    [[unlikely]] if (index > graphics_sampler_table.Limit()) {
+        LOG_ERROR(HW_GPU, "Invalid sampler index={}", index);
+        return &slot_samplers[NULL_SAMPLER_ID];
+    }
+    const auto [descriptor, is_new] = graphics_sampler_table.Read(index);
+    SamplerId& id = graphics_sampler_ids[index];
+    [[unlikely]] if (is_new) {
+        id = FindSampler(descriptor);
+    }
+    return &slot_samplers[id];
+}
+
+template <class P>
+typename P::Sampler* TextureCache<P>::GetComputeSampler(u32 index) {
+    [[unlikely]] if (index > compute_sampler_table.Limit()) {
+        LOG_ERROR(HW_GPU, "Invalid sampler index={}", index);
+        return &slot_samplers[NULL_SAMPLER_ID];
+    }
+    const auto [descriptor, is_new] = compute_sampler_table.Read(index);
+    SamplerId& id = compute_sampler_ids[index];
+    [[unlikely]] if (is_new) {
+        id = FindSampler(descriptor);
+    }
+    return &slot_samplers[id];
+}
+
+template <class P>
+void TextureCache<P>::SynchronizeGraphicsDescriptors() {
+    using SamplerIndex = Tegra::Engines::Maxwell3D::Regs::SamplerIndex;
+    const bool linked_tsc = maxwell3d.regs.sampler_index == SamplerIndex::ViaHeaderIndex;
+    const u32 tic_limit = maxwell3d.regs.tic.limit;
+    const u32 tsc_limit = linked_tsc ? tic_limit : maxwell3d.regs.tsc.limit;
+    if (graphics_sampler_table.Synchornize(maxwell3d.regs.tsc.Address(), tsc_limit)) {
+        graphics_sampler_ids.resize(tsc_limit + 1, CORRUPT_ID);
+    }
+    if (graphics_image_table.Synchornize(maxwell3d.regs.tic.Address(), tic_limit)) {
+        graphics_image_view_ids.resize(tic_limit + 1, CORRUPT_ID);
+    }
+}
+
+template <class P>
+void TextureCache<P>::SynchronizeComputeDescriptors() {
+    const bool linked_tsc = kepler_compute.launch_description.linked_tsc;
+    const u32 tic_limit = kepler_compute.regs.tic.limit;
+    const u32 tsc_limit = linked_tsc ? tic_limit : kepler_compute.regs.tsc.limit;
+    const GPUVAddr tsc_gpu_addr = kepler_compute.regs.tsc.Address();
+    if (compute_sampler_table.Synchornize(tsc_gpu_addr, tsc_limit)) {
+        compute_sampler_ids.resize(tsc_limit + 1, CORRUPT_ID);
+    }
+    if (compute_image_table.Synchornize(kepler_compute.regs.tic.Address(), tic_limit)) {
+        compute_image_view_ids.resize(tic_limit + 1, CORRUPT_ID);
+    }
+}
+
+template <class P>
+void TextureCache<P>::UpdateRenderTargets(bool is_clear) {
+    using namespace VideoCommon::Dirty;
+    auto& flags = maxwell3d.dirty.flags;
+    if (!flags[Dirty::RenderTargets]) {
+        return;
+    }
+    flags[Dirty::RenderTargets] = false;
+
+    // Render target control is used on all render targets, so force look ups when this one is up
+    const bool force = flags[Dirty::RenderTargetControl];
+    flags[Dirty::RenderTargetControl] = false;
+
+    for (size_t index = 0; index < NUM_RT; ++index) {
+        ImageViewId& color_buffer_id = render_targets.color_buffer_ids[index];
+        if (flags[Dirty::ColorBuffer0 + index] || force) {
+            flags[Dirty::ColorBuffer0 + index] = false;
+            BindRenderTarget(&color_buffer_id, FindColorBuffer(index, is_clear));
+        }
+        PrepareImageView(color_buffer_id, true, is_clear && IsFullClear(color_buffer_id));
+    }
+    if (flags[Dirty::ZetaBuffer] || force) {
+        flags[Dirty::ZetaBuffer] = false;
+        BindRenderTarget(&render_targets.depth_buffer_id, FindDepthBuffer(is_clear));
+    }
+    const ImageViewId depth_buffer_id = render_targets.depth_buffer_id;
+    PrepareImageView(depth_buffer_id, true, is_clear && IsFullClear(depth_buffer_id));
+
+    for (size_t index = 0; index < NUM_RT; ++index) {
+        render_targets.draw_buffers[index] = static_cast<u8>(maxwell3d.regs.rt_control.Map(index));
+    }
+    render_targets.size = Extent2D{
+        maxwell3d.regs.render_area.width,
+        maxwell3d.regs.render_area.height,
     };
+}
 
-    /**
-     * `PickStrategy` takes care of selecting a proper strategy to deal with a texture recycle.
-     * @param overlaps, the overlapping surfaces registered in the cache.
-     * @param params, the paremeters on the new surface.
-     * @param gpu_addr, the starting address of the new surface.
-     * @param untopological, tells the recycler that the texture has no way to match the overlaps
-     * due to topological reasons.
-     **/
-    RecycleStrategy PickStrategy(std::vector<TSurface>& overlaps, const SurfaceParams& params,
-                                 const GPUVAddr gpu_addr, const MatchTopologyResult untopological) {
-        if (Settings::values.use_accurate_gpu_emulation) {
-            return RecycleStrategy::Flush;
-        }
-        // 3D Textures decision
-        if (params.block_depth > 1 || params.target == SurfaceTarget::Texture3D) {
-            return RecycleStrategy::Flush;
-        }
-        for (auto s : overlaps) {
-            const auto& s_params = s->GetSurfaceParams();
-            if (s_params.block_depth > 1 || s_params.target == SurfaceTarget::Texture3D) {
-                return RecycleStrategy::Flush;
-            }
-        }
-        // Untopological decision
-        if (untopological == MatchTopologyResult::CompressUnmatch) {
-            return RecycleStrategy::Flush;
-        }
-        if (untopological == MatchTopologyResult::FullMatch && !params.is_tiled) {
-            return RecycleStrategy::Flush;
-        }
-        return RecycleStrategy::Ignore;
+template <class P>
+typename P::Framebuffer* TextureCache<P>::GetFramebuffer() {
+    return &slot_framebuffers[GetFramebufferId(render_targets)];
+}
+
+template <class P>
+void TextureCache<P>::FillImageViews(DescriptorTable<TICEntry>& table,
+                                     std::span<ImageViewId> cached_image_view_ids,
+                                     std::span<const u32> indices,
+                                     std::span<ImageViewId> image_view_ids) {
+    ASSERT(indices.size() <= image_view_ids.size());
+    do {
+        has_deleted_images = false;
+        std::ranges::transform(indices, image_view_ids.begin(), [&](u32 index) {
+            return VisitImageView(table, cached_image_view_ids, index);
+        });
+    } while (has_deleted_images);
+}
+
+template <class P>
+ImageViewId TextureCache<P>::VisitImageView(DescriptorTable<TICEntry>& table,
+                                            std::span<ImageViewId> cached_image_view_ids,
+                                            u32 index) {
+    if (index > table.Limit()) {
+        LOG_ERROR(HW_GPU, "Invalid image view index={}", index);
+        return NULL_IMAGE_VIEW_ID;
     }
-
-    /**
-     *  `RecycleSurface` es a method we use to decide what to do with textures we can't resolve in
-     *the cache It has 2 implemented strategies: Ignore and Flush. Ignore just unregisters all the
-     *overlaps and loads the new texture. Flush, flushes all the overlaps into memory and loads the
-     *new surface from that data.
-     * @param overlaps, the overlapping surfaces registered in the cache.
-     * @param params, the paremeters on the new surface.
-     * @param gpu_addr, the starting address of the new surface.
-     * @param preserve_contents, tells if the new surface should be loaded from meory or left blank
-     * @param untopological, tells the recycler that the texture has no way to match the overlaps
-     * due to topological reasons.
-     **/
-    std::pair<TSurface, TView> RecycleSurface(std::vector<TSurface>& overlaps,
-                                              const SurfaceParams& params, const GPUVAddr gpu_addr,
-                                              const bool preserve_contents,
-                                              const MatchTopologyResult untopological) {
-        const bool do_load = preserve_contents && Settings::values.use_accurate_gpu_emulation;
-        for (auto& surface : overlaps) {
-            Unregister(surface);
-        }
-        switch (PickStrategy(overlaps, params, gpu_addr, untopological)) {
-        case RecycleStrategy::Ignore: {
-            return InitializeSurface(gpu_addr, params, do_load);
-        }
-        case RecycleStrategy::Flush: {
-            std::sort(overlaps.begin(), overlaps.end(),
-                      [](const TSurface& a, const TSurface& b) -> bool {
-                          return a->GetModificationTick() < b->GetModificationTick();
-                      });
-            for (auto& surface : overlaps) {
-                FlushSurface(surface);
-            }
-            return InitializeSurface(gpu_addr, params, preserve_contents);
-        }
-        case RecycleStrategy::BufferCopy: {
-            auto new_surface = GetUncachedSurface(gpu_addr, params);
-            BufferCopy(overlaps[0], new_surface);
-            return {new_surface, new_surface->GetMainView()};
-        }
-        default: {
-            UNIMPLEMENTED_MSG("Unimplemented Texture Cache Recycling Strategy!");
-            return InitializeSurface(gpu_addr, params, do_load);
-        }
-        }
+    const auto [descriptor, is_new] = table.Read(index);
+    ImageViewId& image_view_id = cached_image_view_ids[index];
+    if (is_new) {
+        image_view_id = FindImageView(descriptor);
     }
-
-    /**
-     * `RebuildSurface` this method takes a single surface and recreates into another that
-     * may differ in format, target or width alingment.
-     * @param current_surface, the registered surface in the cache which we want to convert.
-     * @param params, the new surface params which we'll use to recreate the surface.
-     **/
-    std::pair<TSurface, TView> RebuildSurface(TSurface current_surface, const SurfaceParams& params,
-                                              bool is_render) {
-        const auto gpu_addr = current_surface->GetGpuAddr();
-        const auto& cr_params = current_surface->GetSurfaceParams();
-        TSurface new_surface;
-        if (cr_params.pixel_format != params.pixel_format && !is_render &&
-            GetSiblingFormat(cr_params.pixel_format) == params.pixel_format) {
-            SurfaceParams new_params = params;
-            new_params.pixel_format = cr_params.pixel_format;
-            new_params.component_type = cr_params.component_type;
-            new_params.type = cr_params.type;
-            new_surface = GetUncachedSurface(gpu_addr, new_params);
-        } else {
-            new_surface = GetUncachedSurface(gpu_addr, params);
-        }
-        const auto& final_params = new_surface->GetSurfaceParams();
-        if (cr_params.type != final_params.type ||
-            (cr_params.component_type != final_params.component_type)) {
-            BufferCopy(current_surface, new_surface);
-        } else {
-            std::vector<CopyParams> bricks = current_surface->BreakDown(final_params);
-            for (auto& brick : bricks) {
-                ImageCopy(current_surface, new_surface, brick);
-            }
-        }
-        Unregister(current_surface);
-        Register(new_surface);
-        new_surface->MarkAsModified(current_surface->IsModified(), Tick());
-        return {new_surface, new_surface->GetMainView()};
+    if (image_view_id != NULL_IMAGE_VIEW_ID) {
+        PrepareImageView(image_view_id, false, false);
     }
+    return image_view_id;
+}
 
-    /**
-     * `ManageStructuralMatch` this method takes a single surface and checks with the new surface's
-     * params if it's an exact match, we return the main view of the registered surface. If it's
-     * formats don't match, we rebuild the surface. We call this last method a `Mirage`. If formats
-     * match but the targets don't, we create an overview View of the registered surface.
-     * @param current_surface, the registered surface in the cache which we want to convert.
-     * @param params, the new surface params which we want to check.
-     **/
-    std::pair<TSurface, TView> ManageStructuralMatch(TSurface current_surface,
-                                                     const SurfaceParams& params, bool is_render) {
-        const bool is_mirage = !current_surface->MatchFormat(params.pixel_format);
-        const bool matches_target = current_surface->MatchTarget(params.target);
-        const auto match_check = [&]() -> std::pair<TSurface, TView> {
-            if (matches_target) {
-                return {current_surface, current_surface->GetMainView()};
-            }
-            return {current_surface, current_surface->EmplaceOverview(params)};
-        };
-        if (!is_mirage) {
-            return match_check();
-        }
-        if (!is_render && GetSiblingFormat(current_surface->GetFormat()) == params.pixel_format) {
-            return match_check();
-        }
-        return RebuildSurface(current_surface, params, is_render);
+template <class P>
+FramebufferId TextureCache<P>::GetFramebufferId(const RenderTargets& key) {
+    const auto [pair, is_new] = framebuffers.try_emplace(key);
+    FramebufferId& framebuffer_id = pair->second;
+    if (!is_new) {
+        return framebuffer_id;
     }
+    std::array<ImageView*, NUM_RT> color_buffers;
+    std::ranges::transform(key.color_buffer_ids, color_buffers.begin(),
+                           [this](ImageViewId id) { return id ? &slot_image_views[id] : nullptr; });
+    ImageView* const depth_buffer =
+        key.depth_buffer_id ? &slot_image_views[key.depth_buffer_id] : nullptr;
+    framebuffer_id = slot_framebuffers.insert(runtime, color_buffers, depth_buffer, key);
+    return framebuffer_id;
+}
 
-    /**
-     * `TryReconstructSurface` unlike `RebuildSurface` where we know the registered surface
-     * matches the candidate in some way, we got no guarantess here. We try to see if the overlaps
-     * are sublayers/mipmaps of the new surface, if they all match we end up recreating a surface
-     * for them, else we return nothing.
-     * @param overlaps, the overlapping surfaces registered in the cache.
-     * @param params, the paremeters on the new surface.
-     * @param gpu_addr, the starting address of the new surface.
-     **/
-    std::optional<std::pair<TSurface, TView>> TryReconstructSurface(std::vector<TSurface>& overlaps,
-                                                                    const SurfaceParams& params,
-                                                                    const GPUVAddr gpu_addr) {
-        if (params.target == SurfaceTarget::Texture3D) {
-            return {};
-        }
-        bool modified = false;
-        TSurface new_surface = GetUncachedSurface(gpu_addr, params);
-        u32 passed_tests = 0;
-        for (auto& surface : overlaps) {
-            const SurfaceParams& src_params = surface->GetSurfaceParams();
-            if (src_params.is_layered || src_params.num_levels > 1) {
-                // We send this cases to recycle as they are more complex to handle
-                return {};
-            }
-            const std::size_t candidate_size = surface->GetSizeInBytes();
-            auto mipmap_layer{new_surface->GetLayerMipmap(surface->GetGpuAddr())};
-            if (!mipmap_layer) {
-                continue;
-            }
-            const auto [layer, mipmap] = *mipmap_layer;
-            if (new_surface->GetMipmapSize(mipmap) != candidate_size) {
-                continue;
-            }
-            modified |= surface->IsModified();
-            // Now we got all the data set up
-            const u32 width = SurfaceParams::IntersectWidth(src_params, params, 0, mipmap);
-            const u32 height = SurfaceParams::IntersectHeight(src_params, params, 0, mipmap);
-            const CopyParams copy_params(0, 0, 0, 0, 0, layer, 0, mipmap, width, height, 1);
-            passed_tests++;
-            ImageCopy(surface, new_surface, copy_params);
-        }
-        if (passed_tests == 0) {
-            return {};
-            // In Accurate GPU all tests should pass, else we recycle
-        } else if (Settings::values.use_accurate_gpu_emulation && passed_tests != overlaps.size()) {
-            return {};
-        }
-        for (auto surface : overlaps) {
-            Unregister(surface);
-        }
-        new_surface->MarkAsModified(modified, Tick());
-        Register(new_surface);
-        return {{new_surface, new_surface->GetMainView()}};
-    }
-
-    /**
-     * `GetSurface` gets the starting address and parameters of a candidate surface and tries
-     * to find a matching surface within the cache. This is done in 3 big steps. The first is to
-     * check the 1st Level Cache in order to find an exact match, if we fail, we move to step 2.
-     * Step 2 is checking if there are any overlaps at all, if none, we just load the texture from
-     * memory else we move to step 3. Step 3 consists on figuring the relationship between the
-     * candidate texture and the overlaps. We divide the scenarios depending if there's 1 or many
-     * overlaps. If there's many, we just try to reconstruct a new surface out of them based on the
-     * candidate's parameters, if we fail, we recycle. When there's only 1 overlap then we have to
-     * check if the candidate is a view (layer/mipmap) of the overlap or if the registered surface
-     * is a mipmap/layer of the candidate. In this last case we reconstruct a new surface.
-     * @param gpu_addr, the starting address of the candidate surface.
-     * @param params, the paremeters on the candidate surface.
-     * @param preserve_contents, tells if the new surface should be loaded from meory or left blank.
-     **/
-    std::pair<TSurface, TView> GetSurface(const GPUVAddr gpu_addr, const SurfaceParams& params,
-                                          bool preserve_contents, bool is_render) {
-        const auto host_ptr{system.GPU().MemoryManager().GetPointer(gpu_addr)};
-        const auto cache_addr{ToCacheAddr(host_ptr)};
-
-        // Step 0: guarantee a valid surface
-        if (!cache_addr) {
-            // Return a null surface if it's invalid
-            SurfaceParams new_params = params;
-            new_params.width = 1;
-            new_params.height = 1;
-            new_params.depth = 1;
-            new_params.block_height = 0;
-            new_params.block_depth = 0;
-            return InitializeSurface(gpu_addr, new_params, false);
-        }
-
-        // Step 1
-        // Check Level 1 Cache for a fast structural match. If candidate surface
-        // matches at certain level we are pretty much done.
-        if (const auto iter = l1_cache.find(cache_addr); iter != l1_cache.end()) {
-            TSurface& current_surface = iter->second;
-            const auto topological_result = current_surface->MatchesTopology(params);
-            if (topological_result != MatchTopologyResult::FullMatch) {
-                std::vector<TSurface> overlaps{current_surface};
-                return RecycleSurface(overlaps, params, gpu_addr, preserve_contents,
-                                      topological_result);
-            }
-            const auto struct_result = current_surface->MatchesStructure(params);
-            if (struct_result != MatchStructureResult::None &&
-                (params.target != SurfaceTarget::Texture3D ||
-                 current_surface->MatchTarget(params.target))) {
-                if (struct_result == MatchStructureResult::FullMatch) {
-                    return ManageStructuralMatch(current_surface, params, is_render);
-                } else {
-                    return RebuildSurface(current_surface, params, is_render);
-                }
-            }
-        }
-
-        // Step 2
-        // Obtain all possible overlaps in the memory region
-        const std::size_t candidate_size = params.GetGuestSizeInBytes();
-        auto overlaps{GetSurfacesInRegion(cache_addr, candidate_size)};
-
-        // If none are found, we are done. we just load the surface and create it.
-        if (overlaps.empty()) {
-            return InitializeSurface(gpu_addr, params, preserve_contents);
-        }
-
-        // Step 3
-        // Now we need to figure the relationship between the texture and its overlaps
-        // we do a topological test to ensure we can find some relationship. If it fails
-        // inmediatly recycle the texture
-        for (const auto& surface : overlaps) {
-            const auto topological_result = surface->MatchesTopology(params);
-            if (topological_result != MatchTopologyResult::FullMatch) {
-                return RecycleSurface(overlaps, params, gpu_addr, preserve_contents,
-                                      topological_result);
-            }
-        }
-
-        // Split cases between 1 overlap or many.
-        if (overlaps.size() == 1) {
-            TSurface current_surface = overlaps[0];
-            // First check if the surface is within the overlap. If not, it means
-            // two things either the candidate surface is a supertexture of the overlap
-            // or they don't match in any known way.
-            if (!current_surface->IsInside(gpu_addr, gpu_addr + candidate_size)) {
-                if (current_surface->GetGpuAddr() == gpu_addr) {
-                    std::optional<std::pair<TSurface, TView>> view =
-                        TryReconstructSurface(overlaps, params, gpu_addr);
-                    if (view) {
-                        return *view;
-                    }
-                }
-                return RecycleSurface(overlaps, params, gpu_addr, preserve_contents,
-                                      MatchTopologyResult::FullMatch);
-            }
-            // Now we check if the candidate is a mipmap/layer of the overlap
-            std::optional<TView> view =
-                current_surface->EmplaceView(params, gpu_addr, candidate_size);
-            if (view) {
-                const bool is_mirage = !current_surface->MatchFormat(params.pixel_format);
-                if (is_mirage) {
-                    // On a mirage view, we need to recreate the surface under this new view
-                    // and then obtain a view again.
-                    SurfaceParams new_params = current_surface->GetSurfaceParams();
-                    const u32 wh = SurfaceParams::ConvertWidth(
-                        new_params.width, new_params.pixel_format, params.pixel_format);
-                    const u32 hh = SurfaceParams::ConvertHeight(
-                        new_params.height, new_params.pixel_format, params.pixel_format);
-                    new_params.width = wh;
-                    new_params.height = hh;
-                    new_params.pixel_format = params.pixel_format;
-                    std::pair<TSurface, TView> pair =
-                        RebuildSurface(current_surface, new_params, is_render);
-                    std::optional<TView> mirage_view =
-                        pair.first->EmplaceView(params, gpu_addr, candidate_size);
-                    if (mirage_view)
-                        return {pair.first, *mirage_view};
-                    return RecycleSurface(overlaps, params, gpu_addr, preserve_contents,
-                                          MatchTopologyResult::FullMatch);
-                }
-                return {current_surface, *view};
-            }
-        } else {
-            // If there are many overlaps, odds are they are subtextures of the candidate
-            // surface. We try to construct a new surface based on the candidate parameters,
-            // using the overlaps. If a single overlap fails, this will fail.
-            std::optional<std::pair<TSurface, TView>> view =
-                TryReconstructSurface(overlaps, params, gpu_addr);
-            if (view) {
-                return *view;
-            }
-        }
-        // We failed all the tests, recycle the overlaps into a new texture.
-        return RecycleSurface(overlaps, params, gpu_addr, preserve_contents,
-                              MatchTopologyResult::FullMatch);
-    }
-
-    std::pair<TSurface, TView> InitializeSurface(GPUVAddr gpu_addr, const SurfaceParams& params,
-                                                 bool preserve_contents) {
-        auto new_surface{GetUncachedSurface(gpu_addr, params)};
-        Register(new_surface);
-        if (preserve_contents) {
-            LoadSurface(new_surface);
-        }
-        return {new_surface, new_surface->GetMainView()};
-    }
-
-    void LoadSurface(const TSurface& surface) {
-        staging_cache.GetBuffer(0).resize(surface->GetHostSizeInBytes());
-        surface->LoadBuffer(system.GPU().MemoryManager(), staging_cache);
-        surface->UploadTexture(staging_cache.GetBuffer(0));
-        surface->MarkAsModified(false, Tick());
-    }
-
-    void FlushSurface(const TSurface& surface) {
-        if (!surface->IsModified()) {
+template <class P>
+void TextureCache<P>::WriteMemory(VAddr cpu_addr, size_t size) {
+    ForEachImageInRegion(cpu_addr, size, [this](ImageId image_id, Image& image) {
+        if (True(image.flags & ImageFlagBits::CpuModified)) {
             return;
         }
-        staging_cache.GetBuffer(0).resize(surface->GetHostSizeInBytes());
-        surface->DownloadTexture(staging_cache.GetBuffer(0));
-        surface->FlushBuffer(system.GPU().MemoryManager(), staging_cache);
-        surface->MarkAsModified(false, Tick());
-    }
+        image.flags |= ImageFlagBits::CpuModified;
+        UntrackImage(image);
+    });
+}
 
-    void RegisterInnerCache(TSurface& surface) {
-        const CacheAddr cache_addr = surface->GetCacheAddr();
-        CacheAddr start = cache_addr >> registry_page_bits;
-        const CacheAddr end = (surface->GetCacheAddrEnd() - 1) >> registry_page_bits;
-        l1_cache[cache_addr] = surface;
-        while (start <= end) {
-            registry[start].push_back(surface);
-            start++;
+template <class P>
+void TextureCache<P>::DownloadMemory(VAddr cpu_addr, size_t size) {
+    std::vector<ImageId> images;
+    ForEachImageInRegion(cpu_addr, size, [this, &images](ImageId image_id, ImageBase& image) {
+        // Skip images that were not modified from the GPU
+        if (False(image.flags & ImageFlagBits::GpuModified)) {
+            return;
         }
+        // Skip images that .are. modified from the CPU
+        // We don't want to write sensitive data from the guest
+        if (True(image.flags & ImageFlagBits::CpuModified)) {
+            return;
+        }
+        if (image.info.num_samples > 1) {
+            LOG_WARNING(HW_GPU, "MSAA image downloads are not implemented");
+            return;
+        }
+        image.flags &= ~ImageFlagBits::GpuModified;
+        images.push_back(image_id);
+    });
+    if (images.empty()) {
+        return;
     }
-
-    void UnregisterInnerCache(TSurface& surface) {
-        const CacheAddr cache_addr = surface->GetCacheAddr();
-        CacheAddr start = cache_addr >> registry_page_bits;
-        const CacheAddr end = (surface->GetCacheAddrEnd() - 1) >> registry_page_bits;
-        l1_cache.erase(cache_addr);
-        while (start <= end) {
-            auto& reg{registry[start]};
-            reg.erase(std::find(reg.begin(), reg.end(), surface));
-            start++;
-        }
+    std::ranges::sort(images, [this](ImageId lhs, ImageId rhs) {
+        return slot_images[lhs].modification_tick < slot_images[rhs].modification_tick;
+    });
+    for (const ImageId image_id : images) {
+        Image& image = slot_images[image_id];
+        auto map = runtime.DownloadStagingBuffer(image.unswizzled_size_bytes);
+        const auto copies = FullDownloadCopies(image.info);
+        image.DownloadMemory(map, copies);
+        runtime.Finish();
+        SwizzleImage(gpu_memory, image.gpu_addr, image.info, copies, map.mapped_span);
     }
+}
 
-    std::vector<TSurface> GetSurfacesInRegion(const CacheAddr cache_addr, const std::size_t size) {
-        if (size == 0) {
-            return {};
+template <class P>
+void TextureCache<P>::UnmapMemory(VAddr cpu_addr, size_t size) {
+    std::vector<ImageId> deleted_images;
+    ForEachImageInRegion(cpu_addr, size, [&](ImageId id, Image&) { deleted_images.push_back(id); });
+    for (const ImageId id : deleted_images) {
+        Image& image = slot_images[id];
+        if (True(image.flags & ImageFlagBits::Tracked)) {
+            UntrackImage(image);
         }
-        const CacheAddr cache_addr_end = cache_addr + size;
-        CacheAddr start = cache_addr >> registry_page_bits;
-        const CacheAddr end = (cache_addr_end - 1) >> registry_page_bits;
-        std::vector<TSurface> surfaces;
-        while (start <= end) {
-            std::vector<TSurface>& list = registry[start];
-            for (auto& surface : list) {
-                if (!surface->IsPicked() && surface->Overlaps(cache_addr, cache_addr_end)) {
-                    surface->MarkAsPicked(true);
-                    surfaces.push_back(surface);
-                }
-            }
-            start++;
-        }
-        for (auto& surface : surfaces) {
-            surface->MarkAsPicked(false);
-        }
-        return surfaces;
+        UnregisterImage(id);
+        DeleteImage(id);
     }
+}
 
-    void ReserveSurface(const SurfaceParams& params, TSurface surface) {
-        surface_reserve[params].push_back(std::move(surface));
-    }
+template <class P>
+void TextureCache<P>::BlitImage(const Tegra::Engines::Fermi2D::Surface& dst,
+                                const Tegra::Engines::Fermi2D::Surface& src,
+                                const Tegra::Engines::Fermi2D::Config& copy) {
+    const BlitImages images = GetBlitImages(dst, src);
+    const ImageId dst_id = images.dst_id;
+    const ImageId src_id = images.src_id;
+    PrepareImage(src_id, false, false);
+    PrepareImage(dst_id, true, false);
 
-    TSurface TryGetReservedSurface(const SurfaceParams& params) {
-        auto search{surface_reserve.find(params)};
-        if (search == surface_reserve.end()) {
-            return {};
-        }
-        for (auto& surface : search->second) {
-            if (!surface->IsRegistered()) {
-                return surface;
-            }
-        }
-        return {};
-    }
+    ImageBase& dst_image = slot_images[dst_id];
+    const ImageBase& src_image = slot_images[src_id];
 
-    constexpr PixelFormat GetSiblingFormat(PixelFormat format) const {
-        return siblings_table[static_cast<std::size_t>(format)];
-    }
-
-    struct FramebufferTargetInfo {
-        TSurface target;
-        TView view;
+    // TODO: Deduplicate
+    const std::optional dst_base = dst_image.TryFindBase(dst.Address());
+    const SubresourceRange dst_range{.base = dst_base.value(), .extent = {1, 1}};
+    const ImageViewInfo dst_view_info(ImageViewType::e2D, images.dst_format, dst_range);
+    const auto [dst_framebuffer_id, dst_view_id] = RenderTargetFromImage(dst_id, dst_view_info);
+    const auto [src_samples_x, src_samples_y] = SamplesLog2(src_image.info.num_samples);
+    const std::array src_region{
+        Offset2D{.x = copy.src_x0 >> src_samples_x, .y = copy.src_y0 >> src_samples_y},
+        Offset2D{.x = copy.src_x1 >> src_samples_x, .y = copy.src_y1 >> src_samples_y},
     };
 
-    VideoCore::RasterizerInterface& rasterizer;
+    const std::optional src_base = src_image.TryFindBase(src.Address());
+    const SubresourceRange src_range{.base = src_base.value(), .extent = {1, 1}};
+    const ImageViewInfo src_view_info(ImageViewType::e2D, images.src_format, src_range);
+    const auto [src_framebuffer_id, src_view_id] = RenderTargetFromImage(src_id, src_view_info);
+    const auto [dst_samples_x, dst_samples_y] = SamplesLog2(dst_image.info.num_samples);
+    const std::array dst_region{
+        Offset2D{.x = copy.dst_x0 >> dst_samples_x, .y = copy.dst_y0 >> dst_samples_y},
+        Offset2D{.x = copy.dst_x1 >> dst_samples_x, .y = copy.dst_y1 >> dst_samples_y},
+    };
 
-    u64 ticks{};
+    // Always call this after src_framebuffer_id was queried, as the address might be invalidated.
+    Framebuffer* const dst_framebuffer = &slot_framebuffers[dst_framebuffer_id];
+    if constexpr (FRAMEBUFFER_BLITS) {
+        // OpenGL blits from framebuffers, not images
+        Framebuffer* const src_framebuffer = &slot_framebuffers[src_framebuffer_id];
+        runtime.BlitFramebuffer(dst_framebuffer, src_framebuffer, dst_region, src_region,
+                                copy.filter, copy.operation);
+    } else {
+        // Vulkan can blit images, but it lacks format reinterpretations
+        // Provide a framebuffer in case it's necessary
+        ImageView& dst_view = slot_image_views[dst_view_id];
+        ImageView& src_view = slot_image_views[src_view_id];
+        runtime.BlitImage(dst_framebuffer, dst_view, src_view, dst_region, src_region, copy.filter,
+                          copy.operation);
+    }
+}
 
-    // Guards the cache for protection conflicts.
-    bool guard_render_targets{};
-    bool guard_samplers{};
+template <class P>
+void TextureCache<P>::InvalidateColorBuffer(size_t index) {
+    ImageViewId& color_buffer_id = render_targets.color_buffer_ids[index];
+    color_buffer_id = FindColorBuffer(index, false);
+    if (!color_buffer_id) {
+        LOG_ERROR(HW_GPU, "Invalidating invalid color buffer in index={}", index);
+        return;
+    }
+    // When invalidating a color buffer, the old contents are no longer relevant
+    ImageView& color_buffer = slot_image_views[color_buffer_id];
+    Image& image = slot_images[color_buffer.image_id];
+    image.flags &= ~ImageFlagBits::CpuModified;
+    image.flags &= ~ImageFlagBits::GpuModified;
 
-    // The siblings table is for formats that can inter exchange with one another
-    // without causing issues. This is only valid when a conflict occurs on a non
-    // rendering use.
-    std::array<PixelFormat, static_cast<std::size_t>(PixelFormat::Max)> siblings_table;
+    runtime.InvalidateColorBuffer(color_buffer, index);
+}
 
-    // The internal Cache is different for the Texture Cache. It's based on buckets
-    // of 1MB. This fits better for the purpose of this cache as textures are normaly
-    // large in size.
-    static constexpr u64 registry_page_bits{20};
-    static constexpr u64 registry_page_size{1 << registry_page_bits};
-    std::unordered_map<CacheAddr, std::vector<TSurface>> registry;
+template <class P>
+void TextureCache<P>::InvalidateDepthBuffer() {
+    ImageViewId& depth_buffer_id = render_targets.depth_buffer_id;
+    depth_buffer_id = FindDepthBuffer(false);
+    if (!depth_buffer_id) {
+        LOG_ERROR(HW_GPU, "Invalidating invalid depth buffer");
+        return;
+    }
+    // When invalidating the depth buffer, the old contents are no longer relevant
+    ImageBase& image = slot_images[slot_image_views[depth_buffer_id].image_id];
+    image.flags &= ~ImageFlagBits::CpuModified;
+    image.flags &= ~ImageFlagBits::GpuModified;
 
-    static constexpr u32 DEPTH_RT = 8;
-    static constexpr u32 NO_RT = 0xFFFFFFFF;
+    ImageView& depth_buffer = slot_image_views[depth_buffer_id];
+    runtime.InvalidateDepthBuffer(depth_buffer);
+}
 
-    // The L1 Cache is used for fast texture lookup before checking the overlaps
-    // This avoids calculating size and other stuffs.
-    std::unordered_map<CacheAddr, TSurface> l1_cache;
+template <class P>
+typename P::ImageView* TextureCache<P>::TryFindFramebufferImageView(VAddr cpu_addr) {
+    // TODO: Properly implement this
+    const auto it = page_table.find(cpu_addr >> PAGE_BITS);
+    if (it == page_table.end()) {
+        return nullptr;
+    }
+    const auto& image_ids = it->second;
+    for (const ImageId image_id : image_ids) {
+        const ImageBase& image = slot_images[image_id];
+        if (image.cpu_addr != cpu_addr) {
+            continue;
+        }
+        if (image.image_view_ids.empty()) {
+            continue;
+        }
+        return &slot_image_views[image.image_view_ids.at(0)];
+    }
+    return nullptr;
+}
 
-    /// The surface reserve is a "backup" cache, this is where we put unique surfaces that have
-    /// previously been used. This is to prevent surfaces from being constantly created and
-    /// destroyed when used with different surface parameters.
-    std::unordered_map<SurfaceParams, std::vector<TSurface>> surface_reserve;
-    std::array<FramebufferTargetInfo, Tegra::Engines::Maxwell3D::Regs::NumRenderTargets>
-        render_targets;
-    FramebufferTargetInfo depth_buffer;
+template <class P>
+bool TextureCache<P>::HasUncommittedFlushes() const noexcept {
+    return !uncommitted_downloads.empty();
+}
 
-    std::vector<TSurface> sampled_textures;
+template <class P>
+bool TextureCache<P>::ShouldWaitAsyncFlushes() const noexcept {
+    return !committed_downloads.empty() && !committed_downloads.front().empty();
+}
 
-    StagingCache staging_cache;
-    std::recursive_mutex mutex;
-};
+template <class P>
+void TextureCache<P>::CommitAsyncFlushes() {
+    // This is intentionally passing the value by copy
+    committed_downloads.push(uncommitted_downloads);
+    uncommitted_downloads.clear();
+}
+
+template <class P>
+void TextureCache<P>::PopAsyncFlushes() {
+    if (committed_downloads.empty()) {
+        return;
+    }
+    const std::span<const ImageId> download_ids = committed_downloads.front();
+    if (download_ids.empty()) {
+        committed_downloads.pop();
+        return;
+    }
+    size_t total_size_bytes = 0;
+    for (const ImageId image_id : download_ids) {
+        total_size_bytes += slot_images[image_id].unswizzled_size_bytes;
+    }
+    auto download_map = runtime.DownloadStagingBuffer(total_size_bytes);
+    const size_t original_offset = download_map.offset;
+    for (const ImageId image_id : download_ids) {
+        Image& image = slot_images[image_id];
+        const auto copies = FullDownloadCopies(image.info);
+        image.DownloadMemory(download_map, copies);
+        download_map.offset += image.unswizzled_size_bytes;
+    }
+    // Wait for downloads to finish
+    runtime.Finish();
+
+    download_map.offset = original_offset;
+    std::span<u8> download_span = download_map.mapped_span;
+    for (const ImageId image_id : download_ids) {
+        const ImageBase& image = slot_images[image_id];
+        const auto copies = FullDownloadCopies(image.info);
+        SwizzleImage(gpu_memory, image.gpu_addr, image.info, copies, download_span);
+        download_map.offset += image.unswizzled_size_bytes;
+        download_span = download_span.subspan(image.unswizzled_size_bytes);
+    }
+    committed_downloads.pop();
+}
+
+template <class P>
+bool TextureCache<P>::IsRegionGpuModified(VAddr addr, size_t size) {
+    bool is_modified = false;
+    ForEachImageInRegion(addr, size, [&is_modified](ImageId, ImageBase& image) {
+        if (False(image.flags & ImageFlagBits::GpuModified)) {
+            return false;
+        }
+        is_modified = true;
+        return true;
+    });
+    return is_modified;
+}
+
+template <class P>
+void TextureCache<P>::RefreshContents(Image& image) {
+    if (False(image.flags & ImageFlagBits::CpuModified)) {
+        // Only upload modified images
+        return;
+    }
+    image.flags &= ~ImageFlagBits::CpuModified;
+    TrackImage(image);
+
+    if (image.info.num_samples > 1) {
+        LOG_WARNING(HW_GPU, "MSAA image uploads are not implemented");
+        return;
+    }
+    auto staging = runtime.UploadStagingBuffer(MapSizeBytes(image));
+    UploadImageContents(image, staging);
+    runtime.InsertUploadMemoryBarrier();
+}
+
+template <class P>
+template <typename StagingBuffer>
+void TextureCache<P>::UploadImageContents(Image& image, StagingBuffer& staging) {
+    const std::span<u8> mapped_span = staging.mapped_span;
+    const GPUVAddr gpu_addr = image.gpu_addr;
+
+    if (True(image.flags & ImageFlagBits::AcceleratedUpload)) {
+        gpu_memory.ReadBlockUnsafe(gpu_addr, mapped_span.data(), mapped_span.size_bytes());
+        const auto uploads = FullUploadSwizzles(image.info);
+        runtime.AccelerateImageUpload(image, staging, uploads);
+    } else if (True(image.flags & ImageFlagBits::Converted)) {
+        std::vector<u8> unswizzled_data(image.unswizzled_size_bytes);
+        auto copies = UnswizzleImage(gpu_memory, gpu_addr, image.info, unswizzled_data);
+        ConvertImage(unswizzled_data, image.info, mapped_span, copies);
+        image.UploadMemory(staging, copies);
+    } else if (image.info.type == ImageType::Buffer) {
+        const std::array copies{UploadBufferCopy(gpu_memory, gpu_addr, image, mapped_span)};
+        image.UploadMemory(staging, copies);
+    } else {
+        const auto copies = UnswizzleImage(gpu_memory, gpu_addr, image.info, mapped_span);
+        image.UploadMemory(staging, copies);
+    }
+}
+
+template <class P>
+ImageViewId TextureCache<P>::FindImageView(const TICEntry& config) {
+    if (!IsValidAddress(gpu_memory, config)) {
+        return NULL_IMAGE_VIEW_ID;
+    }
+    const auto [pair, is_new] = image_views.try_emplace(config);
+    ImageViewId& image_view_id = pair->second;
+    if (is_new) {
+        image_view_id = CreateImageView(config);
+    }
+    return image_view_id;
+}
+
+template <class P>
+ImageViewId TextureCache<P>::CreateImageView(const TICEntry& config) {
+    const ImageInfo info(config);
+    const GPUVAddr image_gpu_addr = config.Address() - config.BaseLayer() * info.layer_stride;
+    const ImageId image_id = FindOrInsertImage(info, image_gpu_addr);
+    if (!image_id) {
+        return NULL_IMAGE_VIEW_ID;
+    }
+    ImageBase& image = slot_images[image_id];
+    const SubresourceBase base = image.TryFindBase(config.Address()).value();
+    ASSERT(base.level == 0);
+    const ImageViewInfo view_info(config, base.layer);
+    const ImageViewId image_view_id = FindOrEmplaceImageView(image_id, view_info);
+    ImageViewBase& image_view = slot_image_views[image_view_id];
+    image_view.flags |= ImageViewFlagBits::Strong;
+    image.flags |= ImageFlagBits::Strong;
+    return image_view_id;
+}
+
+template <class P>
+ImageId TextureCache<P>::FindOrInsertImage(const ImageInfo& info, GPUVAddr gpu_addr,
+                                           RelaxedOptions options) {
+    if (const ImageId image_id = FindImage(info, gpu_addr, options); image_id) {
+        return image_id;
+    }
+    return InsertImage(info, gpu_addr, options);
+}
+
+template <class P>
+ImageId TextureCache<P>::FindImage(const ImageInfo& info, GPUVAddr gpu_addr,
+                                   RelaxedOptions options) {
+    const std::optional<VAddr> cpu_addr = gpu_memory.GpuToCpuAddress(gpu_addr);
+    if (!cpu_addr) {
+        return ImageId{};
+    }
+    const bool broken_views = runtime.HasBrokenTextureViewFormats();
+    ImageId image_id;
+    const auto lambda = [&](ImageId existing_image_id, ImageBase& existing_image) {
+        if (info.type == ImageType::Linear || existing_image.info.type == ImageType::Linear) {
+            const bool strict_size = False(options & RelaxedOptions::Size) &&
+                                     True(existing_image.flags & ImageFlagBits::Strong);
+            const ImageInfo& existing = existing_image.info;
+            if (existing_image.gpu_addr == gpu_addr && existing.type == info.type &&
+                existing.pitch == info.pitch &&
+                IsPitchLinearSameSize(existing, info, strict_size) &&
+                IsViewCompatible(existing.format, info.format, broken_views)) {
+                image_id = existing_image_id;
+                return true;
+            }
+        } else if (IsSubresource(info, existing_image, gpu_addr, options, broken_views)) {
+            image_id = existing_image_id;
+            return true;
+        }
+        return false;
+    };
+    ForEachImageInRegion(*cpu_addr, CalculateGuestSizeInBytes(info), lambda);
+    return image_id;
+}
+
+template <class P>
+ImageId TextureCache<P>::InsertImage(const ImageInfo& info, GPUVAddr gpu_addr,
+                                     RelaxedOptions options) {
+    const std::optional<VAddr> cpu_addr = gpu_memory.GpuToCpuAddress(gpu_addr);
+    ASSERT_MSG(cpu_addr, "Tried to insert an image to an invalid gpu_addr=0x{:x}", gpu_addr);
+    const ImageId image_id = JoinImages(info, gpu_addr, *cpu_addr);
+    const Image& image = slot_images[image_id];
+    // Using "image.gpu_addr" instead of "gpu_addr" is important because it might be different
+    const auto [it, is_new] = image_allocs_table.try_emplace(image.gpu_addr);
+    if (is_new) {
+        it->second = slot_image_allocs.insert();
+    }
+    slot_image_allocs[it->second].images.push_back(image_id);
+    return image_id;
+}
+
+template <class P>
+ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, VAddr cpu_addr) {
+    ImageInfo new_info = info;
+    const size_t size_bytes = CalculateGuestSizeInBytes(new_info);
+    const bool broken_views = runtime.HasBrokenTextureViewFormats();
+    std::vector<ImageId> overlap_ids;
+    std::vector<ImageId> left_aliased_ids;
+    std::vector<ImageId> right_aliased_ids;
+    ForEachImageInRegion(cpu_addr, size_bytes, [&](ImageId overlap_id, ImageBase& overlap) {
+        if (info.type != overlap.info.type) {
+            return;
+        }
+        if (info.type == ImageType::Linear) {
+            if (info.pitch == overlap.info.pitch && gpu_addr == overlap.gpu_addr) {
+                // Alias linear images with the same pitch
+                left_aliased_ids.push_back(overlap_id);
+            }
+            return;
+        }
+        static constexpr bool strict_size = true;
+        const std::optional<OverlapResult> solution =
+            ResolveOverlap(new_info, gpu_addr, cpu_addr, overlap, strict_size, broken_views);
+        if (solution) {
+            gpu_addr = solution->gpu_addr;
+            cpu_addr = solution->cpu_addr;
+            new_info.resources = solution->resources;
+            overlap_ids.push_back(overlap_id);
+            return;
+        }
+        static constexpr auto options = RelaxedOptions::Size | RelaxedOptions::Format;
+        const ImageBase new_image_base(new_info, gpu_addr, cpu_addr);
+        if (IsSubresource(new_info, overlap, gpu_addr, options, broken_views)) {
+            left_aliased_ids.push_back(overlap_id);
+        } else if (IsSubresource(overlap.info, new_image_base, overlap.gpu_addr, options,
+                                 broken_views)) {
+            right_aliased_ids.push_back(overlap_id);
+        }
+    });
+    const ImageId new_image_id = slot_images.insert(runtime, new_info, gpu_addr, cpu_addr);
+    Image& new_image = slot_images[new_image_id];
+
+    // TODO: Only upload what we need
+    RefreshContents(new_image);
+
+    for (const ImageId overlap_id : overlap_ids) {
+        Image& overlap = slot_images[overlap_id];
+        if (overlap.info.num_samples != new_image.info.num_samples) {
+            LOG_WARNING(HW_GPU, "Copying between images with different samples is not implemented");
+        } else {
+            const SubresourceBase base = new_image.TryFindBase(overlap.gpu_addr).value();
+            const auto copies = MakeShrinkImageCopies(new_info, overlap.info, base);
+            runtime.CopyImage(new_image, overlap, copies);
+        }
+        if (True(overlap.flags & ImageFlagBits::Tracked)) {
+            UntrackImage(overlap);
+        }
+        UnregisterImage(overlap_id);
+        DeleteImage(overlap_id);
+    }
+    ImageBase& new_image_base = new_image;
+    for (const ImageId aliased_id : right_aliased_ids) {
+        ImageBase& aliased = slot_images[aliased_id];
+        AddImageAlias(new_image_base, aliased, new_image_id, aliased_id);
+    }
+    for (const ImageId aliased_id : left_aliased_ids) {
+        ImageBase& aliased = slot_images[aliased_id];
+        AddImageAlias(aliased, new_image_base, aliased_id, new_image_id);
+    }
+    RegisterImage(new_image_id);
+    return new_image_id;
+}
+
+template <class P>
+typename TextureCache<P>::BlitImages TextureCache<P>::GetBlitImages(
+    const Tegra::Engines::Fermi2D::Surface& dst, const Tegra::Engines::Fermi2D::Surface& src) {
+    static constexpr auto FIND_OPTIONS = RelaxedOptions::Format | RelaxedOptions::Samples;
+    const GPUVAddr dst_addr = dst.Address();
+    const GPUVAddr src_addr = src.Address();
+    ImageInfo dst_info(dst);
+    ImageInfo src_info(src);
+    ImageId dst_id;
+    ImageId src_id;
+    do {
+        has_deleted_images = false;
+        dst_id = FindImage(dst_info, dst_addr, FIND_OPTIONS);
+        src_id = FindImage(src_info, src_addr, FIND_OPTIONS);
+        const ImageBase* const dst_image = dst_id ? &slot_images[dst_id] : nullptr;
+        const ImageBase* const src_image = src_id ? &slot_images[src_id] : nullptr;
+        DeduceBlitImages(dst_info, src_info, dst_image, src_image);
+        if (GetFormatType(dst_info.format) != GetFormatType(src_info.format)) {
+            continue;
+        }
+        if (!dst_id) {
+            dst_id = InsertImage(dst_info, dst_addr, RelaxedOptions{});
+        }
+        if (!src_id) {
+            src_id = InsertImage(src_info, src_addr, RelaxedOptions{});
+        }
+    } while (has_deleted_images);
+    return BlitImages{
+        .dst_id = dst_id,
+        .src_id = src_id,
+        .dst_format = dst_info.format,
+        .src_format = src_info.format,
+    };
+}
+
+template <class P>
+SamplerId TextureCache<P>::FindSampler(const TSCEntry& config) {
+    if (std::ranges::all_of(config.raw, [](u64 value) { return value == 0; })) {
+        return NULL_SAMPLER_ID;
+    }
+    const auto [pair, is_new] = samplers.try_emplace(config);
+    if (is_new) {
+        pair->second = slot_samplers.insert(runtime, config);
+    }
+    return pair->second;
+}
+
+template <class P>
+ImageViewId TextureCache<P>::FindColorBuffer(size_t index, bool is_clear) {
+    const auto& regs = maxwell3d.regs;
+    if (index >= regs.rt_control.count) {
+        return ImageViewId{};
+    }
+    const auto& rt = regs.rt[index];
+    const GPUVAddr gpu_addr = rt.Address();
+    if (gpu_addr == 0) {
+        return ImageViewId{};
+    }
+    if (rt.format == Tegra::RenderTargetFormat::NONE) {
+        return ImageViewId{};
+    }
+    const ImageInfo info(regs, index);
+    return FindRenderTargetView(info, gpu_addr, is_clear);
+}
+
+template <class P>
+ImageViewId TextureCache<P>::FindDepthBuffer(bool is_clear) {
+    const auto& regs = maxwell3d.regs;
+    if (!regs.zeta_enable) {
+        return ImageViewId{};
+    }
+    const GPUVAddr gpu_addr = regs.zeta.Address();
+    if (gpu_addr == 0) {
+        return ImageViewId{};
+    }
+    const ImageInfo info(regs);
+    return FindRenderTargetView(info, gpu_addr, is_clear);
+}
+
+template <class P>
+ImageViewId TextureCache<P>::FindRenderTargetView(const ImageInfo& info, GPUVAddr gpu_addr,
+                                                  bool is_clear) {
+    const auto options = is_clear ? RelaxedOptions::Samples : RelaxedOptions{};
+    const ImageId image_id = FindOrInsertImage(info, gpu_addr, options);
+    if (!image_id) {
+        return NULL_IMAGE_VIEW_ID;
+    }
+    Image& image = slot_images[image_id];
+    const ImageViewType view_type = RenderTargetImageViewType(info);
+    SubresourceBase base;
+    if (image.info.type == ImageType::Linear) {
+        base = SubresourceBase{.level = 0, .layer = 0};
+    } else {
+        base = image.TryFindBase(gpu_addr).value();
+    }
+    const s32 layers = image.info.type == ImageType::e3D ? info.size.depth : info.resources.layers;
+    const SubresourceRange range{
+        .base = base,
+        .extent = {.levels = 1, .layers = layers},
+    };
+    return FindOrEmplaceImageView(image_id, ImageViewInfo(view_type, info.format, range));
+}
+
+template <class P>
+template <typename Func>
+void TextureCache<P>::ForEachImageInRegion(VAddr cpu_addr, size_t size, Func&& func) {
+    using FuncReturn = typename std::invoke_result<Func, ImageId, Image&>::type;
+    static constexpr bool BOOL_BREAK = std::is_same_v<FuncReturn, bool>;
+    boost::container::small_vector<ImageId, 32> images;
+    ForEachPage(cpu_addr, size, [this, &images, cpu_addr, size, func](u64 page) {
+        const auto it = page_table.find(page);
+        if (it == page_table.end()) {
+            if constexpr (BOOL_BREAK) {
+                return false;
+            } else {
+                return;
+            }
+        }
+        for (const ImageId image_id : it->second) {
+            Image& image = slot_images[image_id];
+            if (True(image.flags & ImageFlagBits::Picked)) {
+                continue;
+            }
+            if (!image.Overlaps(cpu_addr, size)) {
+                continue;
+            }
+            image.flags |= ImageFlagBits::Picked;
+            images.push_back(image_id);
+            if constexpr (BOOL_BREAK) {
+                if (func(image_id, image)) {
+                    return true;
+                }
+            } else {
+                func(image_id, image);
+            }
+        }
+        if constexpr (BOOL_BREAK) {
+            return false;
+        }
+    });
+    for (const ImageId image_id : images) {
+        slot_images[image_id].flags &= ~ImageFlagBits::Picked;
+    }
+}
+
+template <class P>
+ImageViewId TextureCache<P>::FindOrEmplaceImageView(ImageId image_id, const ImageViewInfo& info) {
+    Image& image = slot_images[image_id];
+    if (const ImageViewId image_view_id = image.FindView(info); image_view_id) {
+        return image_view_id;
+    }
+    const ImageViewId image_view_id = slot_image_views.insert(runtime, info, image_id, image);
+    image.InsertView(info, image_view_id);
+    return image_view_id;
+}
+
+template <class P>
+void TextureCache<P>::RegisterImage(ImageId image_id) {
+    ImageBase& image = slot_images[image_id];
+    ASSERT_MSG(False(image.flags & ImageFlagBits::Registered),
+               "Trying to register an already registered image");
+    image.flags |= ImageFlagBits::Registered;
+    ForEachPage(image.cpu_addr, image.guest_size_bytes,
+                [this, image_id](u64 page) { page_table[page].push_back(image_id); });
+}
+
+template <class P>
+void TextureCache<P>::UnregisterImage(ImageId image_id) {
+    Image& image = slot_images[image_id];
+    ASSERT_MSG(True(image.flags & ImageFlagBits::Registered),
+               "Trying to unregister an already registered image");
+    image.flags &= ~ImageFlagBits::Registered;
+    ForEachPage(image.cpu_addr, image.guest_size_bytes, [this, image_id](u64 page) {
+        const auto page_it = page_table.find(page);
+        if (page_it == page_table.end()) {
+            UNREACHABLE_MSG("Unregistering unregistered page=0x{:x}", page << PAGE_BITS);
+            return;
+        }
+        std::vector<ImageId>& image_ids = page_it->second;
+        const auto vector_it = std::ranges::find(image_ids, image_id);
+        if (vector_it == image_ids.end()) {
+            UNREACHABLE_MSG("Unregistering unregistered image in page=0x{:x}", page << PAGE_BITS);
+            return;
+        }
+        image_ids.erase(vector_it);
+    });
+}
+
+template <class P>
+void TextureCache<P>::TrackImage(ImageBase& image) {
+    ASSERT(False(image.flags & ImageFlagBits::Tracked));
+    image.flags |= ImageFlagBits::Tracked;
+    rasterizer.UpdatePagesCachedCount(image.cpu_addr, image.guest_size_bytes, 1);
+}
+
+template <class P>
+void TextureCache<P>::UntrackImage(ImageBase& image) {
+    ASSERT(True(image.flags & ImageFlagBits::Tracked));
+    image.flags &= ~ImageFlagBits::Tracked;
+    rasterizer.UpdatePagesCachedCount(image.cpu_addr, image.guest_size_bytes, -1);
+}
+
+template <class P>
+void TextureCache<P>::DeleteImage(ImageId image_id) {
+    ImageBase& image = slot_images[image_id];
+    const GPUVAddr gpu_addr = image.gpu_addr;
+    const auto alloc_it = image_allocs_table.find(gpu_addr);
+    if (alloc_it == image_allocs_table.end()) {
+        UNREACHABLE_MSG("Trying to delete an image alloc that does not exist in address 0x{:x}",
+                        gpu_addr);
+        return;
+    }
+    const ImageAllocId alloc_id = alloc_it->second;
+    std::vector<ImageId>& alloc_images = slot_image_allocs[alloc_id].images;
+    const auto alloc_image_it = std::ranges::find(alloc_images, image_id);
+    if (alloc_image_it == alloc_images.end()) {
+        UNREACHABLE_MSG("Trying to delete an image that does not exist");
+        return;
+    }
+    ASSERT_MSG(False(image.flags & ImageFlagBits::Tracked), "Image was not untracked");
+    ASSERT_MSG(False(image.flags & ImageFlagBits::Registered), "Image was not unregistered");
+
+    // Mark render targets as dirty
+    auto& dirty = maxwell3d.dirty.flags;
+    dirty[Dirty::RenderTargets] = true;
+    dirty[Dirty::ZetaBuffer] = true;
+    for (size_t rt = 0; rt < NUM_RT; ++rt) {
+        dirty[Dirty::ColorBuffer0 + rt] = true;
+    }
+    const std::span<const ImageViewId> image_view_ids = image.image_view_ids;
+    for (const ImageViewId image_view_id : image_view_ids) {
+        std::ranges::replace(render_targets.color_buffer_ids, image_view_id, ImageViewId{});
+        if (render_targets.depth_buffer_id == image_view_id) {
+            render_targets.depth_buffer_id = ImageViewId{};
+        }
+    }
+    RemoveImageViewReferences(image_view_ids);
+    RemoveFramebuffers(image_view_ids);
+
+    for (const AliasedImage& alias : image.aliased_images) {
+        ImageBase& other_image = slot_images[alias.id];
+        [[maybe_unused]] const size_t num_removed_aliases =
+            std::erase_if(other_image.aliased_images, [image_id](const AliasedImage& other_alias) {
+                return other_alias.id == image_id;
+            });
+        ASSERT_MSG(num_removed_aliases == 1, "Invalid number of removed aliases: {}",
+                   num_removed_aliases);
+    }
+    for (const ImageViewId image_view_id : image_view_ids) {
+        sentenced_image_view.Push(std::move(slot_image_views[image_view_id]));
+        slot_image_views.erase(image_view_id);
+    }
+    sentenced_images.Push(std::move(slot_images[image_id]));
+    slot_images.erase(image_id);
+
+    alloc_images.erase(alloc_image_it);
+    if (alloc_images.empty()) {
+        image_allocs_table.erase(alloc_it);
+    }
+    if constexpr (ENABLE_VALIDATION) {
+        std::ranges::fill(graphics_image_view_ids, CORRUPT_ID);
+        std::ranges::fill(compute_image_view_ids, CORRUPT_ID);
+    }
+    graphics_image_table.Invalidate();
+    compute_image_table.Invalidate();
+    has_deleted_images = true;
+}
+
+template <class P>
+void TextureCache<P>::RemoveImageViewReferences(std::span<const ImageViewId> removed_views) {
+    auto it = image_views.begin();
+    while (it != image_views.end()) {
+        const auto found = std::ranges::find(removed_views, it->second);
+        if (found != removed_views.end()) {
+            it = image_views.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+template <class P>
+void TextureCache<P>::RemoveFramebuffers(std::span<const ImageViewId> removed_views) {
+    auto it = framebuffers.begin();
+    while (it != framebuffers.end()) {
+        if (it->first.Contains(removed_views)) {
+            it = framebuffers.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+template <class P>
+void TextureCache<P>::MarkModification(ImageBase& image) noexcept {
+    image.flags |= ImageFlagBits::GpuModified;
+    image.modification_tick = ++modification_tick;
+}
+
+template <class P>
+void TextureCache<P>::SynchronizeAliases(ImageId image_id) {
+    boost::container::small_vector<const AliasedImage*, 1> aliased_images;
+    ImageBase& image = slot_images[image_id];
+    u64 most_recent_tick = image.modification_tick;
+    for (const AliasedImage& aliased : image.aliased_images) {
+        ImageBase& aliased_image = slot_images[aliased.id];
+        if (image.modification_tick < aliased_image.modification_tick) {
+            most_recent_tick = std::max(most_recent_tick, aliased_image.modification_tick);
+            aliased_images.push_back(&aliased);
+        }
+    }
+    if (aliased_images.empty()) {
+        return;
+    }
+    image.modification_tick = most_recent_tick;
+    std::ranges::sort(aliased_images, [this](const AliasedImage* lhs, const AliasedImage* rhs) {
+        const ImageBase& lhs_image = slot_images[lhs->id];
+        const ImageBase& rhs_image = slot_images[rhs->id];
+        return lhs_image.modification_tick < rhs_image.modification_tick;
+    });
+    for (const AliasedImage* const aliased : aliased_images) {
+        CopyImage(image_id, aliased->id, aliased->copies);
+    }
+}
+
+template <class P>
+void TextureCache<P>::PrepareImage(ImageId image_id, bool is_modification, bool invalidate) {
+    Image& image = slot_images[image_id];
+    if (invalidate) {
+        image.flags &= ~(ImageFlagBits::CpuModified | ImageFlagBits::GpuModified);
+        if (False(image.flags & ImageFlagBits::Tracked)) {
+            TrackImage(image);
+        }
+    } else {
+        RefreshContents(image);
+        SynchronizeAliases(image_id);
+    }
+    if (is_modification) {
+        MarkModification(image);
+    }
+    image.frame_tick = frame_tick;
+}
+
+template <class P>
+void TextureCache<P>::PrepareImageView(ImageViewId image_view_id, bool is_modification,
+                                       bool invalidate) {
+    if (!image_view_id) {
+        return;
+    }
+    const ImageViewBase& image_view = slot_image_views[image_view_id];
+    PrepareImage(image_view.image_id, is_modification, invalidate);
+}
+
+template <class P>
+void TextureCache<P>::CopyImage(ImageId dst_id, ImageId src_id, std::span<const ImageCopy> copies) {
+    Image& dst = slot_images[dst_id];
+    Image& src = slot_images[src_id];
+    const auto dst_format_type = GetFormatType(dst.info.format);
+    const auto src_format_type = GetFormatType(src.info.format);
+    if (src_format_type == dst_format_type) {
+        if constexpr (HAS_EMULATED_COPIES) {
+            if (!runtime.CanImageBeCopied(dst, src)) {
+                return runtime.EmulateCopyImage(dst, src, copies);
+            }
+        }
+        return runtime.CopyImage(dst, src, copies);
+    }
+    UNIMPLEMENTED_IF(dst.info.type != ImageType::e2D);
+    UNIMPLEMENTED_IF(src.info.type != ImageType::e2D);
+    for (const ImageCopy& copy : copies) {
+        UNIMPLEMENTED_IF(copy.dst_subresource.num_layers != 1);
+        UNIMPLEMENTED_IF(copy.src_subresource.num_layers != 1);
+        UNIMPLEMENTED_IF(copy.src_offset != Offset3D{});
+        UNIMPLEMENTED_IF(copy.dst_offset != Offset3D{});
+
+        const SubresourceBase dst_base{
+            .level = copy.dst_subresource.base_level,
+            .layer = copy.dst_subresource.base_layer,
+        };
+        const SubresourceBase src_base{
+            .level = copy.src_subresource.base_level,
+            .layer = copy.src_subresource.base_layer,
+        };
+        const SubresourceExtent dst_extent{.levels = 1, .layers = 1};
+        const SubresourceExtent src_extent{.levels = 1, .layers = 1};
+        const SubresourceRange dst_range{.base = dst_base, .extent = dst_extent};
+        const SubresourceRange src_range{.base = src_base, .extent = src_extent};
+        const ImageViewInfo dst_view_info(ImageViewType::e2D, dst.info.format, dst_range);
+        const ImageViewInfo src_view_info(ImageViewType::e2D, src.info.format, src_range);
+        const auto [dst_framebuffer_id, dst_view_id] = RenderTargetFromImage(dst_id, dst_view_info);
+        Framebuffer* const dst_framebuffer = &slot_framebuffers[dst_framebuffer_id];
+        const ImageViewId src_view_id = FindOrEmplaceImageView(src_id, src_view_info);
+        ImageView& dst_view = slot_image_views[dst_view_id];
+        ImageView& src_view = slot_image_views[src_view_id];
+        [[maybe_unused]] const Extent3D expected_size{
+            .width = std::min(dst_view.size.width, src_view.size.width),
+            .height = std::min(dst_view.size.height, src_view.size.height),
+            .depth = std::min(dst_view.size.depth, src_view.size.depth),
+        };
+        UNIMPLEMENTED_IF(copy.extent != expected_size);
+
+        runtime.ConvertImage(dst_framebuffer, dst_view, src_view);
+    }
+}
+
+template <class P>
+void TextureCache<P>::BindRenderTarget(ImageViewId* old_id, ImageViewId new_id) {
+    if (*old_id == new_id) {
+        return;
+    }
+    if (*old_id) {
+        const ImageViewBase& old_view = slot_image_views[*old_id];
+        if (True(old_view.flags & ImageViewFlagBits::PreemtiveDownload)) {
+            uncommitted_downloads.push_back(old_view.image_id);
+        }
+    }
+    *old_id = new_id;
+}
+
+template <class P>
+std::pair<FramebufferId, ImageViewId> TextureCache<P>::RenderTargetFromImage(
+    ImageId image_id, const ImageViewInfo& view_info) {
+    const ImageViewId view_id = FindOrEmplaceImageView(image_id, view_info);
+    const ImageBase& image = slot_images[image_id];
+    const bool is_color = GetFormatType(image.info.format) == SurfaceType::ColorTexture;
+    const ImageViewId color_view_id = is_color ? view_id : ImageViewId{};
+    const ImageViewId depth_view_id = is_color ? ImageViewId{} : view_id;
+    const Extent3D extent = MipSize(image.info.size, view_info.range.base.level);
+    const u32 num_samples = image.info.num_samples;
+    const auto [samples_x, samples_y] = SamplesLog2(num_samples);
+    const FramebufferId framebuffer_id = GetFramebufferId(RenderTargets{
+        .color_buffer_ids = {color_view_id},
+        .depth_buffer_id = depth_view_id,
+        .size = {extent.width >> samples_x, extent.height >> samples_y},
+    });
+    return {framebuffer_id, view_id};
+}
+
+template <class P>
+bool TextureCache<P>::IsFullClear(ImageViewId id) {
+    if (!id) {
+        return true;
+    }
+    const ImageViewBase& image_view = slot_image_views[id];
+    const ImageBase& image = slot_images[image_view.image_id];
+    const Extent3D size = image_view.size;
+    const auto& regs = maxwell3d.regs;
+    const auto& scissor = regs.scissor_test[0];
+    if (image.info.resources.levels > 1 || image.info.resources.layers > 1) {
+        // Images with multiple resources can't be cleared in a single call
+        return false;
+    }
+    if (regs.clear_flags.scissor == 0) {
+        // If scissor testing is disabled, the clear is always full
+        return true;
+    }
+    // Make sure the clear covers all texels in the subresource
+    return scissor.min_x == 0 && scissor.min_y == 0 && scissor.max_x >= size.width &&
+           scissor.max_y >= size.height;
+}
 
 } // namespace VideoCommon

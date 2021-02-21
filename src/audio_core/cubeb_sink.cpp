@@ -8,6 +8,7 @@
 #include "audio_core/cubeb_sink.h"
 #include "audio_core/stream.h"
 #include "audio_core/time_stretch.h"
+#include "common/assert.h"
 #include "common/logging/log.h"
 #include "common/ring_buffer.h"
 #include "core/settings.h"
@@ -20,16 +21,27 @@ namespace AudioCore {
 
 class CubebSinkStream final : public SinkStream {
 public:
-    CubebSinkStream(cubeb* ctx, u32 sample_rate, u32 num_channels_, cubeb_devid output_device,
+    CubebSinkStream(cubeb* ctx_, u32 sample_rate, u32 num_channels_, cubeb_devid output_device,
                     const std::string& name)
-        : ctx{ctx}, num_channels{std::min(num_channels_, 2u)}, time_stretch{sample_rate,
-                                                                            num_channels} {
+        : ctx{ctx_}, num_channels{std::min(num_channels_, 6u)}, time_stretch{sample_rate,
+                                                                             num_channels} {
 
         cubeb_stream_params params{};
         params.rate = sample_rate;
         params.channels = num_channels;
         params.format = CUBEB_SAMPLE_S16NE;
-        params.layout = num_channels == 1 ? CUBEB_LAYOUT_MONO : CUBEB_LAYOUT_STEREO;
+        params.prefs = CUBEB_STREAM_PREF_PERSIST;
+        switch (num_channels) {
+        case 1:
+            params.layout = CUBEB_LAYOUT_MONO;
+            break;
+        case 2:
+            params.layout = CUBEB_LAYOUT_STEREO;
+            break;
+        case 6:
+            params.layout = CUBEB_LAYOUT_3F2_LFE;
+            break;
+        }
 
         u32 minimum_latency{};
         if (cubeb_get_min_latency(ctx, &params, &minimum_latency) != CUBEB_OK) {
@@ -65,12 +77,27 @@ public:
     void EnqueueSamples(u32 source_num_channels, const std::vector<s16>& samples) override {
         if (source_num_channels > num_channels) {
             // Downsample 6 channels to 2
+            ASSERT_MSG(source_num_channels == 6, "Channel count must be 6");
+
             std::vector<s16> buf;
             buf.reserve(samples.size() * num_channels / source_num_channels);
             for (std::size_t i = 0; i < samples.size(); i += source_num_channels) {
-                for (std::size_t ch = 0; ch < num_channels; ch++) {
-                    buf.push_back(samples[i + ch]);
-                }
+                // Downmixing implementation taken from the ATSC standard
+                const s16 left{samples[i + 0]};
+                const s16 right{samples[i + 1]};
+                const s16 center{samples[i + 2]};
+                const s16 surround_left{samples[i + 4]};
+                const s16 surround_right{samples[i + 5]};
+                // Not used in the ATSC reference implementation
+                [[maybe_unused]] const s16 low_frequency_effects{samples[i + 3]};
+
+                constexpr s32 clev{707}; // center mixing level coefficient
+                constexpr s32 slev{707}; // surround mixing level coefficient
+
+                buf.push_back(static_cast<s16>(left + (clev * center / 1000) +
+                                               (slev * surround_left / 1000)));
+                buf.push_back(static_cast<s16>(right + (clev * center / 1000) +
+                                               (slev * surround_right / 1000)));
             }
             queue.Push(buf);
             return;
@@ -166,10 +193,11 @@ SinkStream& CubebSink::AcquireSinkStream(u32 sample_rate, u32 num_channels,
     return *sink_streams.back();
 }
 
-long CubebSinkStream::DataCallback(cubeb_stream* stream, void* user_data, const void* input_buffer,
-                                   void* output_buffer, long num_frames) {
-    CubebSinkStream* impl = static_cast<CubebSinkStream*>(user_data);
-    u8* buffer = reinterpret_cast<u8*>(output_buffer);
+long CubebSinkStream::DataCallback([[maybe_unused]] cubeb_stream* stream, void* user_data,
+                                   [[maybe_unused]] const void* input_buffer, void* output_buffer,
+                                   long num_frames) {
+    auto* impl = static_cast<CubebSinkStream*>(user_data);
+    auto* buffer = static_cast<u8*>(output_buffer);
 
     if (!impl) {
         return {};
@@ -179,7 +207,8 @@ long CubebSinkStream::DataCallback(cubeb_stream* stream, void* user_data, const 
     const std::size_t samples_to_write = num_channels * num_frames;
     std::size_t samples_written;
 
-    if (Settings::values.enable_audio_stretching) {
+    /*
+    if (Settings::values.enable_audio_stretching.GetValue()) {
         const std::vector<s16> in{impl->queue.Pop()};
         const std::size_t num_in{in.size() / num_channels};
         s16* const out{reinterpret_cast<s16*>(buffer)};
@@ -193,7 +222,8 @@ long CubebSinkStream::DataCallback(cubeb_stream* stream, void* user_data, const 
         }
     } else {
         samples_written = impl->queue.Pop(buffer, samples_to_write);
-    }
+    }*/
+    samples_written = impl->queue.Pop(buffer, samples_to_write);
 
     if (samples_written >= num_channels) {
         std::memcpy(&impl->last_frame[0], buffer + (samples_written - num_channels) * sizeof(s16),
@@ -208,7 +238,9 @@ long CubebSinkStream::DataCallback(cubeb_stream* stream, void* user_data, const 
     return num_frames;
 }
 
-void CubebSinkStream::StateCallback(cubeb_stream* stream, void* user_data, cubeb_state state) {}
+void CubebSinkStream::StateCallback([[maybe_unused]] cubeb_stream* stream,
+                                    [[maybe_unused]] void* user_data,
+                                    [[maybe_unused]] cubeb_state state) {}
 
 std::vector<std::string> ListCubebSinkDevices() {
     std::vector<std::string> device_list;

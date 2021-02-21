@@ -19,19 +19,19 @@ public:
     explicit ParamPackage(const std::string& serialized);
     ParamPackage(std::initializer_list<DataType::value_type> list);
     ParamPackage(const ParamPackage& other) = default;
-    ParamPackage(ParamPackage&& other) = default;
+    ParamPackage(ParamPackage&& other) noexcept = default;
 
     ParamPackage& operator=(const ParamPackage& other) = default;
     ParamPackage& operator=(ParamPackage&& other) = default;
 
-    std::string Serialize() const;
-    std::string Get(const std::string& key, const std::string& default_value) const;
-    int Get(const std::string& key, int default_value) const;
-    float Get(const std::string& key, float default_value) const;
+    [[nodiscard]] std::string Serialize() const;
+    [[nodiscard]] std::string Get(const std::string& key, const std::string& default_value) const;
+    [[nodiscard]] int Get(const std::string& key, int default_value) const;
+    [[nodiscard]] float Get(const std::string& key, float default_value) const;
     void Set(const std::string& key, std::string value);
     void Set(const std::string& key, int value);
     void Set(const std::string& key, float value);
-    bool Has(const std::string& key) const;
+    [[nodiscard]] bool Has(const std::string& key) const;
     void Erase(const std::string& key);
     void Clear();
 

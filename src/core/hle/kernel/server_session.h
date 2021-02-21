@@ -1,4 +1,4 @@
-// Copyright 2014 Citra Emulator Project
+// Copyright 2019 yuzu emulator team
 // Licensed under GPLv2 or any later version
 // Refer to the license.txt file included.
 
@@ -9,20 +9,27 @@
 #include <utility>
 #include <vector>
 
-#include "core/hle/kernel/object.h"
-#include "core/hle/kernel/wait_object.h"
+#include "common/threadsafe_queue.h"
+#include "core/hle/kernel/k_synchronization_object.h"
+#include "core/hle/kernel/service_thread.h"
 #include "core/hle/result.h"
+
+namespace Core::Memory {
+class Memory;
+}
+
+namespace Core::Timing {
+class CoreTiming;
+struct EventType;
+} // namespace Core::Timing
 
 namespace Kernel {
 
-class ClientPort;
-class ClientSession;
 class HLERequestContext;
 class KernelCore;
-class ServerSession;
 class Session;
 class SessionRequestHandler;
-class Thread;
+class KThread;
 
 /**
  * Kernel object representing the server endpoint of an IPC session. Sessions are the basic CTR-OS
@@ -36,8 +43,19 @@ class Thread;
  * After the server replies to the request, the response is marshalled back to the caller's
  * TLS buffer and control is transferred back to it.
  */
-class ServerSession final : public WaitObject {
+class ServerSession final : public KSynchronizationObject {
+    friend class ServiceThread;
+
 public:
+    explicit ServerSession(KernelCore& kernel);
+    ~ServerSession() override;
+
+    friend class Session;
+
+    static ResultVal<std::shared_ptr<ServerSession>> Create(KernelCore& kernel,
+                                                            std::shared_ptr<Session> parent,
+                                                            std::string name = "Unknown");
+
     std::string GetTypeName() const override {
         return "ServerSession";
     }
@@ -59,18 +77,6 @@ public:
         return parent.get();
     }
 
-    using SessionPair = std::pair<SharedPtr<ServerSession>, SharedPtr<ClientSession>>;
-
-    /**
-     * Creates a pair of ServerSession and an associated ClientSession.
-     * @param kernel      The kernal instance to create the session pair under.
-     * @param name        Optional name of the ports.
-     * @param client_port Optional The ClientPort that spawned this session.
-     * @return The created session tuple
-     */
-    static SessionPair CreateSessionPair(KernelCore& kernel, const std::string& name = "Unknown",
-                                         SharedPtr<ClientPort> client_port = nullptr);
-
     /**
      * Sets the HLE handler for the session. This handler will be called to service IPC requests
      * instead of the regular IPC machinery. (The regular IPC machinery is currently not
@@ -82,14 +88,15 @@ public:
 
     /**
      * Handle a sync request from the emulated application.
-     * @param thread Thread that initiated the request.
+     *
+     * @param thread      Thread that initiated the request.
+     * @param memory      Memory context to handle the sync request under.
+     * @param core_timing Core timing context to schedule the request event under.
+     *
      * @returns ResultCode from the operation.
      */
-    ResultCode HandleSyncRequest(SharedPtr<Thread> thread);
-
-    bool ShouldWait(const Thread* thread) const override;
-
-    void Acquire(Thread* thread) override;
+    ResultCode HandleSyncRequest(std::shared_ptr<KThread> thread, Core::Memory::Memory& memory,
+                                 Core::Timing::CoreTiming& core_timing);
 
     /// Called when a client disconnection occurs.
     void ClientDisconnected();
@@ -117,19 +124,16 @@ public:
         convert_to_domain = true;
     }
 
-private:
-    explicit ServerSession(KernelCore& kernel);
-    ~ServerSession() override;
+    bool IsSignaled() const override;
 
-    /**
-     * Creates a server session. The server session can have an optional HLE handler,
-     * which will be invoked to handle the IPC requests that this session receives.
-     * @param kernel The kernel instance to create this server session under.
-     * @param name Optional name of the server session.
-     * @return The created server session
-     */
-    static ResultVal<SharedPtr<ServerSession>> Create(KernelCore& kernel,
-                                                      std::string name = "Unknown");
+    void Finalize() override {}
+
+private:
+    /// Queues a sync request from the emulated application.
+    ResultCode QueueSyncRequest(std::shared_ptr<KThread> thread, Core::Memory::Memory& memory);
+
+    /// Completes a sync request from the emulated application.
+    ResultCode CompleteSyncRequest(HLERequestContext& context);
 
     /// Handles a SyncRequest to a domain, forwarding the request to the proper object or closing an
     /// object handle.
@@ -147,18 +151,21 @@ private:
     /// List of threads that are pending a response after a sync request. This list is processed in
     /// a LIFO manner, thus, the last request will be dispatched first.
     /// TODO(Subv): Verify if this is indeed processed in LIFO using a hardware test.
-    std::vector<SharedPtr<Thread>> pending_requesting_threads;
+    std::vector<std::shared_ptr<KThread>> pending_requesting_threads;
 
     /// Thread whose request is currently being handled. A request is considered "handled" when a
     /// response is sent via svcReplyAndReceive.
     /// TODO(Subv): Find a better name for this.
-    SharedPtr<Thread> currently_handling;
+    std::shared_ptr<KThread> currently_handling;
 
     /// When set to True, converts the session to a domain at the end of the command
     bool convert_to_domain{};
 
     /// The name of this session (optional)
     std::string name;
+
+    /// Thread to dispatch service requests
+    std::weak_ptr<ServiceThread> service_thread;
 };
 
 } // namespace Kernel

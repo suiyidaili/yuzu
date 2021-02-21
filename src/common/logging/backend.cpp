@@ -23,6 +23,7 @@
 #include "common/logging/text_formatter.h"
 #include "common/string_util.h"
 #include "common/threadsafe_queue.h"
+#include "core/settings.h"
 
 namespace Log {
 
@@ -113,19 +114,19 @@ private:
     Entry CreateEntry(Class log_class, Level log_level, const char* filename, unsigned int line_nr,
                       const char* function, std::string message) const {
         using std::chrono::duration_cast;
+        using std::chrono::microseconds;
         using std::chrono::steady_clock;
 
-        Entry entry;
-        entry.timestamp =
-            duration_cast<std::chrono::microseconds>(steady_clock::now() - time_origin);
-        entry.log_class = log_class;
-        entry.log_level = log_level;
-        entry.filename = Common::TrimSourcePath(filename);
-        entry.line_num = line_nr;
-        entry.function = function;
-        entry.message = std::move(message);
-
-        return entry;
+        return {
+            .timestamp = duration_cast<microseconds>(steady_clock::now() - time_origin),
+            .log_class = log_class,
+            .log_level = log_level,
+            .filename = filename,
+            .line_num = line_nr,
+            .function = function,
+            .message = std::move(message),
+            .final_entry = false,
+        };
     }
 
     std::mutex writing_mutex;
@@ -144,18 +145,35 @@ void ColorConsoleBackend::Write(const Entry& entry) {
     PrintColoredMessage(entry);
 }
 
-// _SH_DENYWR allows read only access to the file for other programs.
-// It is #defined to 0 on other platforms
-FileBackend::FileBackend(const std::string& filename)
-    : file(filename, "w", _SH_DENYWR), bytes_written(0) {}
+FileBackend::FileBackend(const std::string& filename) : bytes_written(0) {
+    if (Common::FS::Exists(filename + ".old.txt")) {
+        Common::FS::Delete(filename + ".old.txt");
+    }
+    if (Common::FS::Exists(filename)) {
+        Common::FS::Rename(filename, filename + ".old.txt");
+    }
+
+    // _SH_DENYWR allows read only access to the file for other programs.
+    // It is #defined to 0 on other platforms
+    file = Common::FS::IOFile(filename, "w", _SH_DENYWR);
+}
 
 void FileBackend::Write(const Entry& entry) {
     // prevent logs from going over the maximum size (in case its spamming and the user doesn't
     // know)
-    constexpr std::size_t MAX_BYTES_WRITTEN = 50 * 1024L * 1024L;
-    if (!file.IsOpen() || bytes_written > MAX_BYTES_WRITTEN) {
+    constexpr std::size_t MAX_BYTES_WRITTEN = 100 * 1024 * 1024;
+    constexpr std::size_t MAX_BYTES_WRITTEN_EXTENDED = 1024 * 1024 * 1024;
+
+    if (!file.IsOpen()) {
         return;
     }
+
+    if (Settings::values.extended_logging && bytes_written > MAX_BYTES_WRITTEN_EXTENDED) {
+        return;
+    } else if (!Settings::values.extended_logging && bytes_written > MAX_BYTES_WRITTEN) {
+        return;
+    }
+
     bytes_written += file.WriteString(FormatLogMessage(entry).append(1, '\n'));
     if (entry.log_level >= Level::Error) {
         file.Flush();
@@ -222,6 +240,7 @@ void DebuggerBackend::Write(const Entry& entry) {
     SUB(Service, NPNS)                                                                             \
     SUB(Service, NS)                                                                               \
     SUB(Service, NVDRV)                                                                            \
+    SUB(Service, OLSC)                                                                             \
     SUB(Service, PCIE)                                                                             \
     SUB(Service, PCTL)                                                                             \
     SUB(Service, PCV)                                                                              \
@@ -255,6 +274,7 @@ void DebuggerBackend::Write(const Entry& entry) {
     CLS(Input)                                                                                     \
     CLS(Network)                                                                                   \
     CLS(Loader)                                                                                    \
+    CLS(CheatEngine)                                                                               \
     CLS(Crypto)                                                                                    \
     CLS(WebService)
 
@@ -271,8 +291,9 @@ const char* GetLogClassName(Class log_class) {
 #undef CLS
 #undef SUB
     case Class::Count:
-        UNREACHABLE();
+        break;
     }
+    return "Invalid";
 }
 
 const char* GetLevelName(Level log_level) {
@@ -287,9 +308,10 @@ const char* GetLevelName(Level log_level) {
         LVL(Error);
         LVL(Critical);
     case Level::Count:
-        UNREACHABLE();
+        break;
     }
 #undef LVL
+    return "Invalid";
 }
 
 void SetGlobalFilter(const Filter& filter) {

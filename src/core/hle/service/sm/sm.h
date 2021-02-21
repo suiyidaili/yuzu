@@ -9,15 +9,21 @@
 #include <type_traits>
 #include <unordered_map>
 
+#include "common/concepts.h"
 #include "core/hle/kernel/client_port.h"
 #include "core/hle/kernel/object.h"
 #include "core/hle/kernel/server_port.h"
 #include "core/hle/result.h"
 #include "core/hle/service/service.h"
 
+namespace Core {
+class System;
+}
+
 namespace Kernel {
 class ClientPort;
 class ClientSession;
+class KernelCore;
 class ServerPort;
 class SessionRequestHandler;
 } // namespace Kernel
@@ -29,7 +35,7 @@ class Controller;
 /// Interface to "sm:" service
 class SM final : public ServiceFramework<SM> {
 public:
-    explicit SM(std::shared_ptr<ServiceManager> service_manager);
+    explicit SM(std::shared_ptr<ServiceManager> service_manager_, Core::System& system_);
     ~SM() override;
 
 private:
@@ -39,25 +45,24 @@ private:
     void UnregisterService(Kernel::HLERequestContext& ctx);
 
     std::shared_ptr<ServiceManager> service_manager;
+    Kernel::KernelCore& kernel;
 };
 
 class ServiceManager {
 public:
-    static void InstallInterfaces(std::shared_ptr<ServiceManager> self);
+    static void InstallInterfaces(std::shared_ptr<ServiceManager> self, Core::System& system);
 
-    ServiceManager();
+    explicit ServiceManager(Kernel::KernelCore& kernel_);
     ~ServiceManager();
 
-    ResultVal<Kernel::SharedPtr<Kernel::ServerPort>> RegisterService(std::string name,
-                                                                     unsigned int max_sessions);
+    ResultVal<std::shared_ptr<Kernel::ServerPort>> RegisterService(std::string name,
+                                                                   u32 max_sessions);
     ResultCode UnregisterService(const std::string& name);
-    ResultVal<Kernel::SharedPtr<Kernel::ClientPort>> GetServicePort(const std::string& name);
-    ResultVal<Kernel::SharedPtr<Kernel::ClientSession>> ConnectToService(const std::string& name);
+    ResultVal<std::shared_ptr<Kernel::ClientPort>> GetServicePort(const std::string& name);
+    ResultVal<std::shared_ptr<Kernel::ClientSession>> ConnectToService(const std::string& name);
 
-    template <typename T>
+    template <Common::DerivedFrom<Kernel::SessionRequestHandler> T>
     std::shared_ptr<T> GetService(const std::string& service_name) const {
-        static_assert(std::is_base_of_v<Kernel::SessionRequestHandler, T>,
-                      "Not a base of ServiceFrameworkBase");
         auto service = registered_services.find(service_name);
         if (service == registered_services.end()) {
             LOG_DEBUG(Service, "Can't find service: {}", service_name);
@@ -77,7 +82,10 @@ private:
     std::unique_ptr<Controller> controller_interface;
 
     /// Map of registered services, retrieved using GetServicePort or ConnectToService.
-    std::unordered_map<std::string, Kernel::SharedPtr<Kernel::ClientPort>> registered_services;
+    std::unordered_map<std::string, std::shared_ptr<Kernel::ClientPort>> registered_services;
+
+    /// Kernel context
+    Kernel::KernelCore& kernel;
 };
 
 } // namespace Service::SM

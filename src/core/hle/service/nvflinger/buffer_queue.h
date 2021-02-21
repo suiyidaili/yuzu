@@ -4,7 +4,9 @@
 
 #pragma once
 
+#include <condition_variable>
 #include <list>
+#include <mutex>
 #include <optional>
 #include <vector>
 
@@ -12,11 +14,18 @@
 #include "common/math_util.h"
 #include "common/swap.h"
 #include "core/hle/kernel/object.h"
-#include "core/hle/kernel/writable_event.h"
 #include "core/hle/service/nvdrv/nvdata.h"
+
+namespace Kernel {
+class KernelCore;
+class KEvent;
+class KReadableEvent;
+class KWritableEvent;
+} // namespace Kernel
 
 namespace Service::NVFlinger {
 
+constexpr u32 buffer_slots = 0x40;
 struct IGBPBuffer {
     u32_le magic;
     u32_le width;
@@ -44,7 +53,7 @@ public:
         NativeWindowFormat = 2,
     };
 
-    BufferQueue(u32 id, u64 layer_id);
+    explicit BufferQueue(Kernel::KernelCore& kernel, u32 id, u64 layer_id);
     ~BufferQueue();
 
     enum class BufferTransformFlags : u32 {
@@ -60,6 +69,16 @@ public:
         Rotate180 = 0x03,
         /// Rotate source image 270 degrees clockwise
         Rotate270 = 0x07,
+    };
+
+    enum class PixelFormat : u32 {
+        RGBA8888 = 1,
+        RGBX8888 = 2,
+        RGB888 = 3,
+        RGB565 = 4,
+        BGRA8888 = 5,
+        RGBA5551 = 6,
+        RRGBA4444 = 7,
     };
 
     struct Buffer {
@@ -81,25 +100,41 @@ public:
     void QueueBuffer(u32 slot, BufferTransformFlags transform,
                      const Common::Rectangle<int>& crop_rect, u32 swap_interval,
                      Service::Nvidia::MultiFence& multi_fence);
+    void CancelBuffer(u32 slot, const Service::Nvidia::MultiFence& multi_fence);
     std::optional<std::reference_wrapper<const Buffer>> AcquireBuffer();
     void ReleaseBuffer(u32 slot);
+    void Connect();
+    void Disconnect();
     u32 Query(QueryType type);
 
     u32 GetId() const {
         return id;
     }
 
-    Kernel::SharedPtr<Kernel::WritableEvent> GetWritableBufferWaitEvent() const;
+    bool IsConnected() const {
+        return is_connect;
+    }
 
-    Kernel::SharedPtr<Kernel::ReadableEvent> GetBufferWaitEvent() const;
+    std::shared_ptr<Kernel::KWritableEvent> GetWritableBufferWaitEvent() const;
+
+    std::shared_ptr<Kernel::KReadableEvent> GetBufferWaitEvent() const;
 
 private:
-    u32 id;
-    u64 layer_id;
+    BufferQueue(const BufferQueue&) = delete;
 
-    std::vector<Buffer> queue;
+    u32 id{};
+    u64 layer_id{};
+    std::atomic_bool is_connect{};
+
+    std::list<u32> free_buffers;
+    std::array<Buffer, buffer_slots> buffers;
     std::list<u32> queue_sequence;
-    Kernel::EventPair buffer_wait_event;
+    std::shared_ptr<Kernel::KEvent> buffer_wait_event;
+
+    std::mutex free_buffers_mutex;
+    std::condition_variable free_buffers_condition;
+
+    std::mutex queue_sequence_mutex;
 };
 
 } // namespace Service::NVFlinger

@@ -12,7 +12,8 @@ namespace Service::SSL {
 
 class ISslConnection final : public ServiceFramework<ISslConnection> {
 public:
-    ISslConnection() : ServiceFramework("ISslConnection") {
+    explicit ISslConnection(Core::System& system_) : ServiceFramework{system_, "ISslConnection"} {
+        // clang-format off
         static const FunctionInfo functions[] = {
             {0, nullptr, "SetSocketDescriptor"},
             {1, nullptr, "SetHostName"},
@@ -40,14 +41,18 @@ public:
             {23, nullptr, "GetOption"},
             {24, nullptr, "GetVerifyCertErrors"},
             {25, nullptr, "GetCipherInfo"},
+            {26, nullptr, "SetNextAlpnProto"},
+            {27, nullptr, "GetNextAlpnProto"},
         };
+        // clang-format on
+
         RegisterHandlers(functions);
     }
 };
 
 class ISslContext final : public ServiceFramework<ISslContext> {
 public:
-    ISslContext() : ServiceFramework("ISslContext") {
+    explicit ISslContext(Core::System& system_) : ServiceFramework{system_, "ISslContext"} {
         static const FunctionInfo functions[] = {
             {0, &ISslContext::SetOption, "SetOption"},
             {1, nullptr, "GetOption"},
@@ -87,13 +92,13 @@ private:
 
         IPC::ResponseBuilder rb{ctx, 2, 0, 1};
         rb.Push(RESULT_SUCCESS);
-        rb.PushIpcInterface<ISslConnection>();
+        rb.PushIpcInterface<ISslConnection>(system);
     }
 };
 
 class SSL final : public ServiceFramework<SSL> {
 public:
-    explicit SSL() : ServiceFramework{"ssl"} {
+    explicit SSL(Core::System& system_) : ServiceFramework{system_, "ssl"} {
         // clang-format off
         static const FunctionInfo functions[] = {
             {0, &SSL::CreateContext, "CreateContext"},
@@ -118,7 +123,7 @@ private:
 
         IPC::ResponseBuilder rb{ctx, 2, 0, 1};
         rb.Push(RESULT_SUCCESS);
-        rb.PushIpcInterface<ISslContext>();
+        rb.PushIpcInterface<ISslContext>(system);
     }
 
     void SetInterfaceVersion(Kernel::HLERequestContext& ctx) {
@@ -132,8 +137,8 @@ private:
     }
 };
 
-void InstallInterfaces(SM::ServiceManager& service_manager) {
-    std::make_shared<SSL>()->InstallAsService(service_manager);
+void InstallInterfaces(SM::ServiceManager& service_manager, Core::System& system) {
+    std::make_shared<SSL>(system)->InstallAsService(service_manager);
 }
 
 } // namespace Service::SSL

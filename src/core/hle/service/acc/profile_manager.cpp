@@ -13,26 +13,27 @@
 
 namespace Service::Account {
 
+namespace FS = Common::FS;
 using Common::UUID;
 
 struct UserRaw {
-    UUID uuid;
-    UUID uuid2;
-    u64 timestamp;
-    ProfileUsername username;
-    ProfileData extra_data;
+    UUID uuid{Common::INVALID_UUID};
+    UUID uuid2{Common::INVALID_UUID};
+    u64 timestamp{};
+    ProfileUsername username{};
+    ProfileData extra_data{};
 };
 static_assert(sizeof(UserRaw) == 0xC8, "UserRaw has incorrect size.");
 
 struct ProfileDataRaw {
     INSERT_PADDING_BYTES(0x10);
-    std::array<UserRaw, MAX_USERS> users;
+    std::array<UserRaw, MAX_USERS> users{};
 };
 static_assert(sizeof(ProfileDataRaw) == 0x650, "ProfileDataRaw has incorrect size.");
 
 // TODO(ogniK): Get actual error codes
-constexpr ResultCode ERROR_TOO_MANY_USERS(ErrorModule::Account, -1);
-constexpr ResultCode ERROR_USER_ALREADY_EXISTS(ErrorModule::Account, -2);
+constexpr ResultCode ERROR_TOO_MANY_USERS(ErrorModule::Account, u32(-1));
+constexpr ResultCode ERROR_USER_ALREADY_EXISTS(ErrorModule::Account, u32(-2));
 constexpr ResultCode ERROR_ARGUMENT_IS_NULL(ErrorModule::Account, 20);
 
 constexpr char ACC_SAVE_AVATORS_BASE_PATH[] = "/system/save/8000000000000010/su/avators/";
@@ -40,12 +41,18 @@ constexpr char ACC_SAVE_AVATORS_BASE_PATH[] = "/system/save/8000000000000010/su/
 ProfileManager::ProfileManager() {
     ParseUserSaveFile();
 
-    if (user_count == 0)
+    // Create an user if none are present
+    if (user_count == 0) {
         CreateNewUser(UUID::Generate(), "yuzu");
+    }
 
     auto current = std::clamp<int>(Settings::values.current_user, 0, MAX_USERS - 1);
-    if (UserExistsIndex(current))
+
+    // If user index don't exist. Load the first user and change the active user
+    if (!UserExistsIndex(current)) {
         current = 0;
+        Settings::values.current_user = 0;
+    }
 
     OpenUser(*GetUser(current));
 }
@@ -58,7 +65,7 @@ ProfileManager::~ProfileManager() {
 /// internal management of the users profiles
 std::optional<std::size_t> ProfileManager::AddToProfiles(const ProfileInfo& profile) {
     if (user_count >= MAX_USERS) {
-        return {};
+        return std::nullopt;
     }
     profiles[user_count] = profile;
     return user_count++;
@@ -101,13 +108,14 @@ ResultCode ProfileManager::CreateNewUser(UUID uuid, const ProfileUsername& usern
                     [&uuid](const ProfileInfo& profile) { return uuid == profile.user_uuid; })) {
         return ERROR_USER_ALREADY_EXISTS;
     }
-    ProfileInfo profile;
-    profile.user_uuid = uuid;
-    profile.username = username;
-    profile.data = {};
-    profile.creation_time = 0x0;
-    profile.is_open = false;
-    return AddUser(profile);
+
+    return AddUser({
+        .user_uuid = uuid,
+        .username = username,
+        .creation_time = 0,
+        .data = {},
+        .is_open = false,
+    });
 }
 
 /// Creates a new user on the system. This function allows a much simpler method of registration
@@ -126,7 +134,7 @@ ResultCode ProfileManager::CreateNewUser(UUID uuid, const std::string& username)
 
 std::optional<UUID> ProfileManager::GetUser(std::size_t index) const {
     if (index >= MAX_USERS) {
-        return {};
+        return std::nullopt;
     }
 
     return profiles[index].user_uuid;
@@ -135,13 +143,13 @@ std::optional<UUID> ProfileManager::GetUser(std::size_t index) const {
 /// Returns a users profile index based on their user id.
 std::optional<std::size_t> ProfileManager::GetUserIndex(const UUID& uuid) const {
     if (!uuid) {
-        return {};
+        return std::nullopt;
     }
 
     const auto iter = std::find_if(profiles.begin(), profiles.end(),
                                    [&uuid](const ProfileInfo& p) { return p.user_uuid == uuid; });
     if (iter == profiles.end()) {
-        return {};
+        return std::nullopt;
     }
 
     return static_cast<std::size_t>(std::distance(profiles.begin(), iter));
@@ -225,20 +233,20 @@ void ProfileManager::CloseUser(UUID uuid) {
 
 /// Gets all valid user ids on the system
 UserIDArray ProfileManager::GetAllUsers() const {
-    UserIDArray output;
-    std::transform(profiles.begin(), profiles.end(), output.begin(),
-                   [](const ProfileInfo& p) { return p.user_uuid; });
+    UserIDArray output{};
+    std::ranges::transform(profiles, output.begin(),
+                           [](const ProfileInfo& p) { return p.user_uuid; });
     return output;
 }
 
 /// Get all the open users on the system and zero out the rest of the data. This is specifically
 /// needed for GetOpenUsers and we need to ensure the rest of the output buffer is zero'd out
 UserIDArray ProfileManager::GetOpenUsers() const {
-    UserIDArray output;
-    std::transform(profiles.begin(), profiles.end(), output.begin(), [](const ProfileInfo& p) {
+    UserIDArray output{};
+    std::ranges::transform(profiles, output.begin(), [](const ProfileInfo& p) {
         if (p.is_open)
             return p.user_uuid;
-        return UUID{};
+        return UUID{Common::INVALID_UUID};
     });
     std::stable_partition(output.begin(), output.end(), [](const UUID& uuid) { return uuid; });
     return output;
@@ -305,10 +313,20 @@ bool ProfileManager::SetProfileBase(UUID uuid, const ProfileBase& profile_new) {
     return true;
 }
 
+bool ProfileManager::SetProfileBaseAndData(Common::UUID uuid, const ProfileBase& profile_new,
+                                           const ProfileData& data_new) {
+    const auto index = GetUserIndex(uuid);
+    if (index.has_value() && SetProfileBase(uuid, profile_new)) {
+        profiles[*index].data = data_new;
+        return true;
+    }
+
+    return false;
+}
+
 void ProfileManager::ParseUserSaveFile() {
-    FileUtil::IOFile save(FileUtil::GetUserPath(FileUtil::UserPath::NANDDir) +
-                              ACC_SAVE_AVATORS_BASE_PATH + "profiles.dat",
-                          "rb");
+    const FS::IOFile save(
+        FS::GetUserPath(FS::UserPath::NANDDir) + ACC_SAVE_AVATORS_BASE_PATH + "profiles.dat", "rb");
 
     if (!save.IsOpen()) {
         LOG_WARNING(Service_ACC, "Failed to load profile data from save data... Generating new "
@@ -328,7 +346,13 @@ void ProfileManager::ParseUserSaveFile() {
             continue;
         }
 
-        AddUser({user.uuid, user.username, user.timestamp, user.extra_data, false});
+        AddUser({
+            .user_uuid = user.uuid,
+            .username = user.username,
+            .creation_time = user.timestamp,
+            .data = user.extra_data,
+            .is_open = false,
+        });
     }
 
     std::stable_partition(profiles.begin(), profiles.end(),
@@ -339,29 +363,31 @@ void ProfileManager::WriteUserSaveFile() {
     ProfileDataRaw raw{};
 
     for (std::size_t i = 0; i < MAX_USERS; ++i) {
-        raw.users[i].username = profiles[i].username;
-        raw.users[i].uuid2 = profiles[i].user_uuid;
-        raw.users[i].uuid = profiles[i].user_uuid;
-        raw.users[i].timestamp = profiles[i].creation_time;
-        raw.users[i].extra_data = profiles[i].data;
+        raw.users[i] = {
+            .uuid = profiles[i].user_uuid,
+            .uuid2 = profiles[i].user_uuid,
+            .timestamp = profiles[i].creation_time,
+            .username = profiles[i].username,
+            .extra_data = profiles[i].data,
+        };
     }
 
-    const auto raw_path =
-        FileUtil::GetUserPath(FileUtil::UserPath::NANDDir) + "/system/save/8000000000000010";
-    if (FileUtil::Exists(raw_path) && !FileUtil::IsDirectory(raw_path))
-        FileUtil::Delete(raw_path);
+    const auto raw_path = FS::GetUserPath(FS::UserPath::NANDDir) + "/system/save/8000000000000010";
+    if (FS::Exists(raw_path) && !FS::IsDirectory(raw_path)) {
+        FS::Delete(raw_path);
+    }
 
-    const auto path = FileUtil::GetUserPath(FileUtil::UserPath::NANDDir) +
-                      ACC_SAVE_AVATORS_BASE_PATH + "profiles.dat";
+    const auto path =
+        FS::GetUserPath(FS::UserPath::NANDDir) + ACC_SAVE_AVATORS_BASE_PATH + "profiles.dat";
 
-    if (!FileUtil::CreateFullPath(path)) {
+    if (!FS::CreateFullPath(path)) {
         LOG_WARNING(Service_ACC, "Failed to create full path of profiles.dat. Create the directory "
                                  "nand/system/save/8000000000000010/su/avators to mitigate this "
                                  "issue.");
         return;
     }
 
-    FileUtil::IOFile save(path, "wb");
+    FS::IOFile save(path, "wb");
 
     if (!save.IsOpen()) {
         LOG_WARNING(Service_ACC, "Failed to write save data to file... No changes to user data "

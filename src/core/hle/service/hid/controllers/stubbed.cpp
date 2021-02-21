@@ -9,7 +9,7 @@
 
 namespace Service::HID {
 
-Controller_Stubbed::Controller_Stubbed() = default;
+Controller_Stubbed::Controller_Stubbed(Core::System& system) : ControllerBase(system) {}
 Controller_Stubbed::~Controller_Stubbed() = default;
 
 void Controller_Stubbed::OnInit() {}
@@ -23,7 +23,7 @@ void Controller_Stubbed::OnUpdate(const Core::Timing::CoreTiming& core_timing, u
     }
 
     CommonHeader header{};
-    header.timestamp = core_timing.GetTicks();
+    header.timestamp = core_timing.GetCPUTicks();
     header.total_entry_count = 17;
     header.entry_count = 0;
     header.last_entry_index = 0;

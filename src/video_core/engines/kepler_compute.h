@@ -10,7 +10,10 @@
 #include "common/bit_field.h"
 #include "common/common_funcs.h"
 #include "common/common_types.h"
+#include "video_core/engines/const_buffer_engine_interface.h"
+#include "video_core/engines/engine_interface.h"
 #include "video_core/engines/engine_upload.h"
+#include "video_core/engines/shader_type.h"
 #include "video_core/gpu.h"
 #include "video_core/textures/texture.h"
 
@@ -37,11 +40,13 @@ namespace Tegra::Engines {
 #define KEPLER_COMPUTE_REG_INDEX(field_name)                                                       \
     (offsetof(Tegra::Engines::KeplerCompute::Regs, field_name) / sizeof(u32))
 
-class KeplerCompute final {
+class KeplerCompute final : public ConstBufferEngineInterface, public EngineInterface {
 public:
-    explicit KeplerCompute(Core::System& system, VideoCore::RasterizerInterface& rasterizer,
-                           MemoryManager& memory_manager);
+    explicit KeplerCompute(Core::System& system, MemoryManager& memory_manager);
     ~KeplerCompute();
+
+    /// Binds a rasterizer to this engine.
+    void BindRasterizer(VideoCore::RasterizerInterface* rasterizer);
 
     static constexpr std::size_t NumConstBuffers = 8;
 
@@ -50,7 +55,7 @@ public:
 
         union {
             struct {
-                INSERT_PADDING_WORDS(0x60);
+                INSERT_PADDING_WORDS_NOINIT(0x60);
 
                 Upload::Registers upload;
 
@@ -62,7 +67,7 @@ public:
 
                 u32 data_upload;
 
-                INSERT_PADDING_WORDS(0x3F);
+                INSERT_PADDING_WORDS_NOINIT(0x3F);
 
                 struct {
                     u32 address;
@@ -71,11 +76,11 @@ public:
                     }
                 } launch_desc_loc;
 
-                INSERT_PADDING_WORDS(0x1);
+                INSERT_PADDING_WORDS_NOINIT(0x1);
 
                 u32 launch;
 
-                INSERT_PADDING_WORDS(0x4A7);
+                INSERT_PADDING_WORDS_NOINIT(0x4A7);
 
                 struct {
                     u32 address_high;
@@ -87,7 +92,7 @@ public:
                     }
                 } tsc;
 
-                INSERT_PADDING_WORDS(0x3);
+                INSERT_PADDING_WORDS_NOINIT(0x3);
 
                 struct {
                     u32 address_high;
@@ -99,7 +104,7 @@ public:
                     }
                 } tic;
 
-                INSERT_PADDING_WORDS(0x22);
+                INSERT_PADDING_WORDS_NOINIT(0x22);
 
                 struct {
                     u32 address_high;
@@ -110,11 +115,11 @@ public:
                     }
                 } code_loc;
 
-                INSERT_PADDING_WORDS(0x3FE);
+                INSERT_PADDING_WORDS_NOINIT(0x3FE);
 
                 u32 tex_cb_index;
 
-                INSERT_PADDING_WORDS(0x374);
+                INSERT_PADDING_WORDS_NOINIT(0x374);
             };
             std::array<u32, NUM_REGS> reg_array;
         };
@@ -139,7 +144,7 @@ public:
 
         INSERT_PADDING_WORDS(0x3);
 
-        BitField<0, 16, u32> shared_alloc;
+        BitField<0, 18, u32> shared_alloc;
 
         BitField<16, 16, u32> block_dim_x;
         union {
@@ -177,8 +182,13 @@ public:
             BitField<24, 5, u32> gpr_alloc;
         };
 
-        INSERT_PADDING_WORDS(0x11);
-    } launch_description;
+        union {
+            BitField<0, 20, u32> local_crs_alloc;
+            BitField<24, 5, u32> sass_version;
+        };
+
+        INSERT_PADDING_WORDS(0x10);
+    } launch_description{};
 
     struct {
         u32 write_offset = 0;
@@ -193,22 +203,30 @@ public:
                   "KeplerCompute LaunchParams has wrong size");
 
     /// Write the value to the register identified by method.
-    void CallMethod(const GPU::MethodCall& method_call);
+    void CallMethod(u32 method, u32 method_argument, bool is_last_call) override;
 
-    Tegra::Texture::FullTextureInfo GetTexture(std::size_t offset) const;
+    /// Write multiple values to the register identified by method.
+    void CallMultiMethod(u32 method, const u32* base_start, u32 amount,
+                         u32 methods_pending) override;
 
-    /// Given a Texture Handle, returns the TSC and TIC entries.
-    Texture::FullTextureInfo GetTextureInfo(const Texture::TextureHandle tex_handle,
-                                            std::size_t offset) const;
+    u32 AccessConstBuffer32(ShaderType stage, u64 const_buffer, u64 offset) const override;
 
-    u32 AccessConstBuffer32(u64 const_buffer, u64 offset) const;
+    SamplerDescriptor AccessBoundSampler(ShaderType stage, u64 offset) const override;
+
+    SamplerDescriptor AccessBindlessSampler(ShaderType stage, u64 const_buffer,
+                                            u64 offset) const override;
+
+    SamplerDescriptor AccessSampler(u32 handle) const override;
+
+    u32 GetBoundBuffer() const override {
+        return regs.tex_cb_index;
+    }
+
+    VideoCore::GuestDriverProfile& AccessGuestDriverProfile() override;
+
+    const VideoCore::GuestDriverProfile& AccessGuestDriverProfile() const override;
 
 private:
-    Core::System& system;
-    VideoCore::RasterizerInterface& rasterizer;
-    MemoryManager& memory_manager;
-    Upload::State upload_state;
-
     void ProcessLaunch();
 
     /// Retrieves information about a specific TIC entry from the TIC buffer.
@@ -216,6 +234,11 @@ private:
 
     /// Retrieves information about a specific TSC entry from the TSC buffer.
     Texture::TSCEntry GetTSCEntry(u32 tsc_index) const;
+
+    Core::System& system;
+    MemoryManager& memory_manager;
+    VideoCore::RasterizerInterface* rasterizer = nullptr;
+    Upload::State upload_state;
 };
 
 #define ASSERT_REG_POSITION(field_name, position)                                                  \

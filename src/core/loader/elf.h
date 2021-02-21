@@ -8,6 +8,10 @@
 #include "common/common_types.h"
 #include "core/loader/loader.h"
 
+namespace Core {
+class System;
+}
+
 namespace Loader {
 
 /// Loads an ELF/AXF file
@@ -17,7 +21,7 @@ public:
 
     /**
      * Returns the type of the file
-     * @param file std::shared_ptr<VfsFile> open file
+     * @param file open file
      * @return FileType found, or FileType::Error if this loader doesn't know it
      */
     static FileType IdentifyType(const FileSys::VirtualFile& file);
@@ -26,7 +30,7 @@ public:
         return IdentifyType(file);
     }
 
-    LoadResult Load(Kernel::Process& process) override;
+    LoadResult Load(Kernel::Process& process, Core::System& system) override;
 };
 
 } // namespace Loader

@@ -106,7 +106,7 @@ public:
 
     bool Resize(std::size_t new_size) override;
 
-    std::shared_ptr<VfsDirectory> GetContainingDirectory() const override;
+    VirtualDir GetContainingDirectory() const override;
 
     bool IsWritable() const override;
 
@@ -117,10 +117,6 @@ public:
     bool Rename(std::string_view name) override;
 
 private:
-    template <bool Subsection, typename BlockType, typename BucketType>
-    std::pair<std::size_t, std::size_t> SearchBucketEntry(u64 offset, BlockType block,
-                                                          BucketType buckets) const;
-
     RelocationEntry GetRelocationEntry(u64 offset) const;
     RelocationEntry GetNextRelocationEntry(u64 offset) const;
 

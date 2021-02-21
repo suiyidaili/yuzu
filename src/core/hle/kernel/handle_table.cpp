@@ -6,10 +6,12 @@
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "core/core.h"
-#include "core/hle/kernel/errors.h"
 #include "core/hle/kernel/handle_table.h"
+#include "core/hle/kernel/k_scheduler.h"
+#include "core/hle/kernel/k_thread.h"
+#include "core/hle/kernel/kernel.h"
 #include "core/hle/kernel/process.h"
-#include "core/hle/kernel/thread.h"
+#include "core/hle/kernel/svc_results.h"
 
 namespace Kernel {
 namespace {
@@ -22,7 +24,7 @@ constexpr u16 GetGeneration(Handle handle) {
 }
 } // Anonymous namespace
 
-HandleTable::HandleTable() {
+HandleTable::HandleTable(KernelCore& kernel) : kernel{kernel} {
     Clear();
 }
 
@@ -30,7 +32,8 @@ HandleTable::~HandleTable() = default;
 
 ResultCode HandleTable::SetSize(s32 handle_table_size) {
     if (static_cast<u32>(handle_table_size) > MAX_COUNT) {
-        return ERR_OUT_OF_MEMORY;
+        LOG_ERROR(Kernel, "Handle table size {} is greater than {}", handle_table_size, MAX_COUNT);
+        return ResultOutOfMemory;
     }
 
     // Values less than or equal to zero indicate to use the maximum allowable
@@ -44,13 +47,13 @@ ResultCode HandleTable::SetSize(s32 handle_table_size) {
     return RESULT_SUCCESS;
 }
 
-ResultVal<Handle> HandleTable::Create(SharedPtr<Object> obj) {
+ResultVal<Handle> HandleTable::Create(std::shared_ptr<Object> obj) {
     DEBUG_ASSERT(obj != nullptr);
 
     const u16 slot = next_free_slot;
     if (slot >= table_size) {
         LOG_ERROR(Kernel, "Unable to allocate Handle, too many slots in use.");
-        return ERR_HANDLE_TABLE_FULL;
+        return ResultHandleTableFull;
     }
     next_free_slot = generations[slot];
 
@@ -70,20 +73,25 @@ ResultVal<Handle> HandleTable::Create(SharedPtr<Object> obj) {
 }
 
 ResultVal<Handle> HandleTable::Duplicate(Handle handle) {
-    SharedPtr<Object> object = GetGeneric(handle);
+    std::shared_ptr<Object> object = GetGeneric(handle);
     if (object == nullptr) {
         LOG_ERROR(Kernel, "Tried to duplicate invalid handle: {:08X}", handle);
-        return ERR_INVALID_HANDLE;
+        return ResultInvalidHandle;
     }
     return Create(std::move(object));
 }
 
 ResultCode HandleTable::Close(Handle handle) {
     if (!IsValid(handle)) {
-        return ERR_INVALID_HANDLE;
+        LOG_ERROR(Kernel, "Handle is not valid! handle={:08X}", handle);
+        return ResultInvalidHandle;
     }
 
     const u16 slot = GetSlot(handle);
+
+    if (objects[slot].use_count() == 1) {
+        objects[slot]->Finalize();
+    }
 
     objects[slot] = nullptr;
 
@@ -99,11 +107,11 @@ bool HandleTable::IsValid(Handle handle) const {
     return slot < table_size && objects[slot] != nullptr && generations[slot] == generation;
 }
 
-SharedPtr<Object> HandleTable::GetGeneric(Handle handle) const {
+std::shared_ptr<Object> HandleTable::GetGeneric(Handle handle) const {
     if (handle == CurrentThread) {
-        return GetCurrentThread();
+        return SharedFrom(kernel.CurrentScheduler()->GetCurrentThread());
     } else if (handle == CurrentProcess) {
-        return Core::CurrentProcess();
+        return SharedFrom(kernel.CurrentProcess());
     }
 
     if (!IsValid(handle)) {
@@ -114,7 +122,7 @@ SharedPtr<Object> HandleTable::GetGeneric(Handle handle) const {
 
 void HandleTable::Clear() {
     for (u16 i = 0; i < table_size; ++i) {
-        generations[i] = i + 1;
+        generations[i] = static_cast<u16>(i + 1);
         objects[i] = nullptr;
     }
     next_free_slot = 0;

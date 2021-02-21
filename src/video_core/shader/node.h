@@ -7,6 +7,7 @@
 #include <array>
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -46,6 +47,7 @@ enum class OperationCode {
     FTrunc,        /// (MetaArithmetic, float a) -> float
     FCastInteger,  /// (MetaArithmetic, int a) -> float
     FCastUInteger, /// (MetaArithmetic, uint a) -> float
+    FSwizzleAdd,   /// (float a, float b, uint mask) -> float
 
     IAdd,                  /// (MetaArithmetic, int a, int b) -> int
     IMul,                  /// (MetaArithmetic, int a, int b) -> int
@@ -66,6 +68,7 @@ enum class OperationCode {
     IBitfieldInsert,       /// (MetaArithmetic, int base, int insert, int offset, int bits) -> int
     IBitfieldExtract,      /// (MetaArithmetic, int value, int offset, int offset) -> int
     IBitCount,             /// (MetaArithmetic, int) -> int
+    IBitMSB,               /// (MetaArithmetic, int) -> int
 
     UAdd,                  /// (MetaArithmetic, uint a, uint b) -> uint
     UMul,                  /// (MetaArithmetic, uint a, uint b) -> uint
@@ -84,6 +87,7 @@ enum class OperationCode {
     UBitfieldInsert,  /// (MetaArithmetic, uint base, uint insert, int offset, int bits) -> uint
     UBitfieldExtract, /// (MetaArithmetic, uint value, int offset, int offset) -> uint
     UBitCount,        /// (MetaArithmetic, uint) -> uint
+    UBitMSB,          /// (MetaArithmetic, uint) -> uint
 
     HAdd,       /// (MetaArithmetic, f16vec2 a, f16vec2 b) -> f16vec2
     HMul,       /// (MetaArithmetic, f16vec2 a, f16vec2 b) -> f16vec2
@@ -106,13 +110,20 @@ enum class OperationCode {
     LogicalPick2,  /// (bool2 pair, uint index) -> bool
     LogicalAnd2,   /// (bool2 a) -> bool
 
-    LogicalFLessThan,     /// (float a, float b) -> bool
-    LogicalFEqual,        /// (float a, float b) -> bool
-    LogicalFLessEqual,    /// (float a, float b) -> bool
-    LogicalFGreaterThan,  /// (float a, float b) -> bool
-    LogicalFNotEqual,     /// (float a, float b) -> bool
-    LogicalFGreaterEqual, /// (float a, float b) -> bool
-    LogicalFIsNan,        /// (float a) -> bool
+    LogicalFOrdLessThan,       /// (float a, float b) -> bool
+    LogicalFOrdEqual,          /// (float a, float b) -> bool
+    LogicalFOrdLessEqual,      /// (float a, float b) -> bool
+    LogicalFOrdGreaterThan,    /// (float a, float b) -> bool
+    LogicalFOrdNotEqual,       /// (float a, float b) -> bool
+    LogicalFOrdGreaterEqual,   /// (float a, float b) -> bool
+    LogicalFOrdered,           /// (float a, float b) -> bool
+    LogicalFUnordered,         /// (float a, float b) -> bool
+    LogicalFUnordLessThan,     /// (float a, float b) -> bool
+    LogicalFUnordEqual,        /// (float a, float b) -> bool
+    LogicalFUnordLessEqual,    /// (float a, float b) -> bool
+    LogicalFUnordGreaterThan,  /// (float a, float b) -> bool
+    LogicalFUnordNotEqual,     /// (float a, float b) -> bool
+    LogicalFUnordGreaterEqual, /// (float a, float b) -> bool
 
     LogicalILessThan,     /// (int a, int b) -> bool
     LogicalIEqual,        /// (int a, int b) -> bool
@@ -127,6 +138,8 @@ enum class OperationCode {
     LogicalUGreaterThan,  /// (uint a, uint b) -> bool
     LogicalUNotEqual,     /// (uint a, uint b) -> bool
     LogicalUGreaterEqual, /// (uint a, uint b) -> bool
+
+    LogicalAddCarry, /// (uint a, uint b) -> bool
 
     Logical2HLessThan,            /// (MetaHalfArithmetic, f16vec2 a, f16vec2) -> bool2
     Logical2HEqual,               /// (MetaHalfArithmetic, f16vec2 a, f16vec2) -> bool2
@@ -147,8 +160,46 @@ enum class OperationCode {
     TextureQueryDimensions, /// (MetaTexture, float a) -> float4
     TextureQueryLod,        /// (MetaTexture, float[N] coords) -> float4
     TexelFetch,             /// (MetaTexture, int[N], int) -> float4
+    TextureGradient,        /// (MetaTexture, float[N] coords, float[N*2] derivates) -> float4
 
-    ImageStore, /// (MetaImage, float[N] coords) -> void
+    ImageLoad,  /// (MetaImage, int[N] coords) -> void
+    ImageStore, /// (MetaImage, int[N] coords) -> void
+
+    AtomicImageAdd,      /// (MetaImage, int[N] coords) -> void
+    AtomicImageAnd,      /// (MetaImage, int[N] coords) -> void
+    AtomicImageOr,       /// (MetaImage, int[N] coords) -> void
+    AtomicImageXor,      /// (MetaImage, int[N] coords) -> void
+    AtomicImageExchange, /// (MetaImage, int[N] coords) -> void
+
+    AtomicUExchange, /// (memory, uint) -> uint
+    AtomicUAdd,      /// (memory, uint) -> uint
+    AtomicUMin,      /// (memory, uint) -> uint
+    AtomicUMax,      /// (memory, uint) -> uint
+    AtomicUAnd,      /// (memory, uint) -> uint
+    AtomicUOr,       /// (memory, uint) -> uint
+    AtomicUXor,      /// (memory, uint) -> uint
+
+    AtomicIExchange, /// (memory, int) -> int
+    AtomicIAdd,      /// (memory, int) -> int
+    AtomicIMin,      /// (memory, int) -> int
+    AtomicIMax,      /// (memory, int) -> int
+    AtomicIAnd,      /// (memory, int) -> int
+    AtomicIOr,       /// (memory, int) -> int
+    AtomicIXor,      /// (memory, int) -> int
+
+    ReduceUAdd, /// (memory, uint) -> void
+    ReduceUMin, /// (memory, uint) -> void
+    ReduceUMax, /// (memory, uint) -> void
+    ReduceUAnd, /// (memory, uint) -> void
+    ReduceUOr,  /// (memory, uint) -> void
+    ReduceUXor, /// (memory, uint) -> void
+
+    ReduceIAdd, /// (memory, int) -> void
+    ReduceIMin, /// (memory, int) -> void
+    ReduceIMax, /// (memory, int) -> void
+    ReduceIAnd, /// (memory, int) -> void
+    ReduceIOr,  /// (memory, int) -> void
+    ReduceIXor, /// (memory, int) -> void
 
     Branch,         /// (uint branch_target) -> void
     BranchIndirect, /// (uint branch_target) -> void
@@ -160,6 +211,7 @@ enum class OperationCode {
     EmitVertex,   /// () -> void
     EndPrimitive, /// () -> void
 
+    InvocationId,       /// () -> int
     YNegate,            /// () -> float
     LocalInvocationIdX, /// () -> uint
     LocalInvocationIdY, /// () -> uint
@@ -172,6 +224,18 @@ enum class OperationCode {
     VoteAll,      /// (bool) -> bool
     VoteAny,      /// (bool) -> bool
     VoteEqual,    /// (bool) -> bool
+
+    ThreadId,       /// () -> uint
+    ThreadEqMask,   /// () -> uint
+    ThreadGeMask,   /// () -> uint
+    ThreadGtMask,   /// () -> uint
+    ThreadLeMask,   /// () -> uint
+    ThreadLtMask,   /// () -> uint
+    ShuffleIndexed, /// (uint value, uint index) -> uint
+
+    Barrier,             /// () -> void
+    MemoryBarrierGroup,  /// () -> void
+    MemoryBarrierGlobal, /// () -> void
 
     Amount,
 };
@@ -192,152 +256,129 @@ enum class MetaStackClass {
 class OperationNode;
 class ConditionalNode;
 class GprNode;
+class CustomVarNode;
 class ImmediateNode;
 class InternalFlagNode;
 class PredicateNode;
 class AbufNode;
 class CbufNode;
 class LmemNode;
+class PatchNode;
+class SmemNode;
 class GmemNode;
 class CommentNode;
 
-using NodeData =
-    std::variant<OperationNode, ConditionalNode, GprNode, ImmediateNode, InternalFlagNode,
-                 PredicateNode, AbufNode, CbufNode, LmemNode, GmemNode, CommentNode>;
+using NodeData = std::variant<OperationNode, ConditionalNode, GprNode, CustomVarNode, ImmediateNode,
+                              InternalFlagNode, PredicateNode, AbufNode, PatchNode, CbufNode,
+                              LmemNode, SmemNode, GmemNode, CommentNode>;
 using Node = std::shared_ptr<NodeData>;
 using Node4 = std::array<Node, 4>;
 using NodeBlock = std::vector<Node>;
 
-class Sampler {
-public:
-    /// This constructor is for bound samplers
-    explicit Sampler(std::size_t offset, std::size_t index, Tegra::Shader::TextureType type,
-                     bool is_array, bool is_shadow)
-        : offset{offset}, index{index}, type{type}, is_array{is_array}, is_shadow{is_shadow},
-          is_bindless{false} {}
+struct ArraySamplerNode;
+struct BindlessSamplerNode;
+struct SeparateSamplerNode;
 
-    /// This constructor is for bindless samplers
-    explicit Sampler(u32 cbuf_index, u32 cbuf_offset, std::size_t index,
-                     Tegra::Shader::TextureType type, bool is_array, bool is_shadow)
-        : offset{(static_cast<u64>(cbuf_index) << 32) | cbuf_offset}, index{index}, type{type},
-          is_array{is_array}, is_shadow{is_shadow}, is_bindless{true} {}
+using TrackSamplerData = std::variant<BindlessSamplerNode, SeparateSamplerNode, ArraySamplerNode>;
+using TrackSampler = std::shared_ptr<TrackSamplerData>;
 
-    /// This constructor is for serialization/deserialization
-    explicit Sampler(std::size_t offset, std::size_t index, Tegra::Shader::TextureType type,
-                     bool is_array, bool is_shadow, bool is_bindless)
-        : offset{offset}, index{index}, type{type}, is_array{is_array}, is_shadow{is_shadow},
-          is_bindless{is_bindless} {}
+struct SamplerEntry {
+    /// Bound samplers constructor
+    explicit SamplerEntry(u32 index_, u32 offset_, Tegra::Shader::TextureType type_, bool is_array_,
+                          bool is_shadow_, bool is_buffer_, bool is_indexed_)
+        : index{index_}, offset{offset_}, type{type_}, is_array{is_array_}, is_shadow{is_shadow_},
+          is_buffer{is_buffer_}, is_indexed{is_indexed_} {}
 
-    std::size_t GetOffset() const {
-        return offset;
+    /// Separate sampler constructor
+    explicit SamplerEntry(u32 index_, std::pair<u32, u32> offsets, std::pair<u32, u32> buffers,
+                          Tegra::Shader::TextureType type_, bool is_array_, bool is_shadow_,
+                          bool is_buffer_)
+        : index{index_}, offset{offsets.first}, secondary_offset{offsets.second},
+          buffer{buffers.first}, secondary_buffer{buffers.second}, type{type_}, is_array{is_array_},
+          is_shadow{is_shadow_}, is_buffer{is_buffer_}, is_separated{true} {}
+
+    /// Bindless samplers constructor
+    explicit SamplerEntry(u32 index_, u32 offset_, u32 buffer_, Tegra::Shader::TextureType type_,
+                          bool is_array_, bool is_shadow_, bool is_buffer_, bool is_indexed_)
+        : index{index_}, offset{offset_}, buffer{buffer_}, type{type_}, is_array{is_array_},
+          is_shadow{is_shadow_}, is_buffer{is_buffer_}, is_bindless{true}, is_indexed{is_indexed_} {
     }
 
-    std::size_t GetIndex() const {
-        return index;
-    }
+    u32 index = 0;            ///< Emulated index given for the this sampler.
+    u32 offset = 0;           ///< Offset in the const buffer from where the sampler is being read.
+    u32 secondary_offset = 0; ///< Secondary offset in the const buffer.
+    u32 buffer = 0;           ///< Buffer where the bindless sampler is read.
+    u32 secondary_buffer = 0; ///< Secondary buffer where the bindless sampler is read.
+    u32 size = 1;             ///< Size of the sampler.
 
-    Tegra::Shader::TextureType GetType() const {
-        return type;
-    }
-
-    bool IsArray() const {
-        return is_array;
-    }
-
-    bool IsShadow() const {
-        return is_shadow;
-    }
-
-    bool IsBindless() const {
-        return is_bindless;
-    }
-
-    std::pair<u32, u32> GetBindlessCBuf() const {
-        return {static_cast<u32>(offset >> 32), static_cast<u32>(offset)};
-    }
-
-    bool operator<(const Sampler& rhs) const {
-        return std::tie(index, offset, type, is_array, is_shadow, is_bindless) <
-               std::tie(rhs.index, rhs.offset, rhs.type, rhs.is_array, rhs.is_shadow,
-                        rhs.is_bindless);
-    }
-
-private:
-    /// Offset in TSC memory from which to read the sampler object, as specified by the sampling
-    /// instruction.
-    std::size_t offset{};
-    std::size_t index{}; ///< Value used to index into the generated GLSL sampler array.
     Tegra::Shader::TextureType type{}; ///< The type used to sample this texture (Texture2D, etc)
-    bool is_array{};    ///< Whether the texture is being sampled as an array texture or not.
-    bool is_shadow{};   ///< Whether the texture is being sampled as a depth texture or not.
-    bool is_bindless{}; ///< Whether this sampler belongs to a bindless texture or not.
+    bool is_array = false;     ///< Whether the texture is being sampled as an array texture or not.
+    bool is_shadow = false;    ///< Whether the texture is being sampled as a depth texture or not.
+    bool is_buffer = false;    ///< Whether the texture is a texture buffer without sampler.
+    bool is_bindless = false;  ///< Whether this sampler belongs to a bindless texture or not.
+    bool is_indexed = false;   ///< Whether this sampler is an indexed array of textures.
+    bool is_separated = false; ///< Whether the image and sampler is separated or not.
 };
 
-class Image final {
+/// Represents a tracked bindless sampler into a direct const buffer
+struct ArraySamplerNode {
+    u32 index;
+    u32 base_offset;
+    u32 bindless_var;
+};
+
+/// Represents a tracked separate sampler image pair that was folded statically
+struct SeparateSamplerNode {
+    std::pair<u32, u32> indices;
+    std::pair<u32, u32> offsets;
+};
+
+/// Represents a tracked bindless sampler into a direct const buffer
+struct BindlessSamplerNode {
+    u32 index;
+    u32 offset;
+};
+
+struct ImageEntry {
 public:
-    constexpr explicit Image(u64 offset, std::size_t index, Tegra::Shader::ImageType type)
-        : offset{offset}, index{index}, type{type}, is_bindless{false} {}
+    /// Bound images constructor
+    explicit ImageEntry(u32 index_, u32 offset_, Tegra::Shader::ImageType type_)
+        : index{index_}, offset{offset_}, type{type_} {}
 
-    constexpr explicit Image(u32 cbuf_index, u32 cbuf_offset, std::size_t index,
-                             Tegra::Shader::ImageType type)
-        : offset{(static_cast<u64>(cbuf_index) << 32) | cbuf_offset}, index{index}, type{type},
-          is_bindless{true} {}
-
-    constexpr explicit Image(std::size_t offset, std::size_t index, Tegra::Shader::ImageType type,
-                             bool is_bindless, bool is_written, bool is_read)
-        : offset{offset}, index{index}, type{type}, is_bindless{is_bindless},
-          is_written{is_written}, is_read{is_read} {}
-
-    void MarkRead() {
-        is_read = true;
-    }
+    /// Bindless samplers constructor
+    explicit ImageEntry(u32 index_, u32 offset_, u32 buffer_, Tegra::Shader::ImageType type_)
+        : index{index_}, offset{offset_}, buffer{buffer_}, type{type_}, is_bindless{true} {}
 
     void MarkWrite() {
         is_written = true;
     }
 
-    constexpr std::size_t GetOffset() const {
-        return offset;
+    void MarkRead() {
+        is_read = true;
     }
 
-    constexpr std::size_t GetIndex() const {
-        return index;
+    void MarkAtomic() {
+        MarkWrite();
+        MarkRead();
+        is_atomic = true;
     }
 
-    constexpr Tegra::Shader::ImageType GetType() const {
-        return type;
-    }
+    u32 index = 0;
+    u32 offset = 0;
+    u32 buffer = 0;
 
-    constexpr bool IsBindless() const {
-        return is_bindless;
-    }
-
-    constexpr bool IsRead() const {
-        return is_read;
-    }
-
-    constexpr bool IsWritten() const {
-        return is_written;
-    }
-
-    constexpr std::pair<u32, u32> GetBindlessCBuf() const {
-        return {static_cast<u32>(offset >> 32), static_cast<u32>(offset)};
-    }
-
-private:
-    u64 offset{};
-    std::size_t index{};
     Tegra::Shader::ImageType type{};
-    bool is_bindless{};
-    bool is_read{};
-    bool is_written{};
+    bool is_bindless = false;
+    bool is_written = false;
+    bool is_read = false;
+    bool is_atomic = false;
 };
 
 struct GlobalMemoryBase {
-    u32 cbuf_index{};
-    u32 cbuf_offset{};
+    u32 cbuf_index = 0;
+    u32 cbuf_offset = 0;
 
-    bool operator<(const GlobalMemoryBase& rhs) const {
+    [[nodiscard]] bool operator<(const GlobalMemoryBase& rhs) const {
         return std::tie(cbuf_index, cbuf_offset) < std::tie(rhs.cbuf_index, rhs.cbuf_offset);
     }
 };
@@ -349,56 +390,82 @@ struct MetaArithmetic {
 
 /// Parameters describing a texture sampler
 struct MetaTexture {
-    const Sampler& sampler;
+    SamplerEntry sampler;
     Node array;
     Node depth_compare;
     std::vector<Node> aoffi;
+    std::vector<Node> ptp;
+    std::vector<Node> derivates;
     Node bias;
     Node lod;
-    Node component{};
+    Node component;
     u32 element{};
+    Node index;
 };
 
 struct MetaImage {
-    const Image& image;
+    const ImageEntry& image;
     std::vector<Node> values;
+    u32 element{};
 };
 
 /// Parameters that modify an operation but are not part of any particular operand
 using Meta =
     std::variant<MetaArithmetic, MetaTexture, MetaImage, MetaStackClass, Tegra::Shader::HalfType>;
 
-/// Holds any kind of operation that can be done in the IR
-class OperationNode final {
+class AmendNode {
 public:
-    explicit OperationNode(OperationCode code) : OperationNode(code, Meta{}) {}
+    [[nodiscard]] std::optional<std::size_t> GetAmendIndex() const {
+        if (amend_index == amend_null_index) {
+            return std::nullopt;
+        }
+        return {amend_index};
+    }
 
-    explicit OperationNode(OperationCode code, Meta meta)
-        : OperationNode(code, meta, std::vector<Node>{}) {}
+    void SetAmendIndex(std::size_t index) {
+        amend_index = index;
+    }
 
-    explicit OperationNode(OperationCode code, std::vector<Node> operands)
-        : OperationNode(code, Meta{}, std::move(operands)) {}
+    void ClearAmend() {
+        amend_index = amend_null_index;
+    }
 
-    explicit OperationNode(OperationCode code, Meta meta, std::vector<Node> operands)
-        : code{code}, meta{std::move(meta)}, operands{std::move(operands)} {}
+private:
+    static constexpr std::size_t amend_null_index = 0xFFFFFFFFFFFFFFFFULL;
+    std::size_t amend_index{amend_null_index};
+};
+
+/// Holds any kind of operation that can be done in the IR
+class OperationNode final : public AmendNode {
+public:
+    explicit OperationNode(OperationCode code_) : OperationNode(code_, Meta{}) {}
+
+    explicit OperationNode(OperationCode code_, Meta meta_)
+        : OperationNode(code_, std::move(meta_), std::vector<Node>{}) {}
+
+    explicit OperationNode(OperationCode code_, std::vector<Node> operands_)
+        : OperationNode(code_, Meta{}, std::move(operands_)) {}
+
+    explicit OperationNode(OperationCode code_, Meta meta_, std::vector<Node> operands_)
+        : code{code_}, meta{std::move(meta_)}, operands{std::move(operands_)} {}
 
     template <typename... Args>
-    explicit OperationNode(OperationCode code, Meta meta, Args&&... operands)
-        : code{code}, meta{std::move(meta)}, operands{operands...} {}
+    explicit OperationNode(OperationCode code_, Meta meta_, Args&&... operands_)
+        : code{code_}, meta{std::move(meta_)}, operands{operands_...} {}
 
-    OperationCode GetCode() const {
+    [[nodiscard]] OperationCode GetCode() const {
         return code;
     }
 
-    const Meta& GetMeta() const {
+    [[nodiscard]] const Meta& GetMeta() const {
         return meta;
     }
 
-    std::size_t GetOperandsCount() const {
+    [[nodiscard]] std::size_t GetOperandsCount() const {
         return operands.size();
     }
 
-    const Node& operator[](std::size_t operand_index) const {
+    [[nodiscard]] const Node& operator[](std::size_t operand_index) const {
         return operands.at(operand_index);
     }
 
@@ -409,16 +476,16 @@ private:
 };
 
 /// Encloses inside any kind of node that returns a boolean conditionally-executed code
-class ConditionalNode final {
+class ConditionalNode final : public AmendNode {
 public:
-    explicit ConditionalNode(Node condition, std::vector<Node>&& code)
-        : condition{std::move(condition)}, code{std::move(code)} {}
+    explicit ConditionalNode(Node condition_, std::vector<Node>&& code_)
+        : condition{std::move(condition_)}, code{std::move(code_)} {}
 
-    const Node& GetCondition() const {
+    [[nodiscard]] const Node& GetCondition() const {
         return condition;
     }
 
-    const std::vector<Node>& GetCode() const {
+    [[nodiscard]] const std::vector<Node>& GetCode() const {
         return code;
     }
 
@@ -430,9 +497,9 @@ private:
 /// A general purpose register
 class GprNode final {
 public:
-    explicit constexpr GprNode(Tegra::Shader::Register index) : index{index} {}
+    explicit constexpr GprNode(Tegra::Shader::Register index_) : index{index_} {}
 
-    u32 GetIndex() const {
+    [[nodiscard]] constexpr u32 GetIndex() const {
         return static_cast<u32>(index);
     }
 
@@ -440,12 +507,25 @@ private:
     Tegra::Shader::Register index{};
 };
 
+/// A custom variable
+class CustomVarNode final {
+public:
+    explicit constexpr CustomVarNode(u32 index_) : index{index_} {}
+
+    [[nodiscard]] constexpr u32 GetIndex() const {
+        return index;
+    }
+
+private:
+    u32 index{};
+};
+
 /// A 32-bits value that represents an immediate value
 class ImmediateNode final {
 public:
-    explicit constexpr ImmediateNode(u32 value) : value{value} {}
+    explicit constexpr ImmediateNode(u32 value_) : value{value_} {}
 
-    u32 GetValue() const {
+    [[nodiscard]] constexpr u32 GetValue() const {
         return value;
     }
 
@@ -456,9 +536,9 @@ private:
 /// One of Maxwell's internal flags
 class InternalFlagNode final {
 public:
-    explicit constexpr InternalFlagNode(InternalFlag flag) : flag{flag} {}
+    explicit constexpr InternalFlagNode(InternalFlag flag_) : flag{flag_} {}
 
-    InternalFlag GetFlag() const {
+    [[nodiscard]] constexpr InternalFlag GetFlag() const {
         return flag;
     }
 
@@ -469,14 +549,14 @@ private:
 /// A predicate register, it can be negated without additional nodes
 class PredicateNode final {
 public:
-    explicit constexpr PredicateNode(Tegra::Shader::Pred index, bool negated)
-        : index{index}, negated{negated} {}
+    explicit constexpr PredicateNode(Tegra::Shader::Pred index_, bool negated_)
+        : index{index_}, negated{negated_} {}
 
-    Tegra::Shader::Pred GetIndex() const {
+    [[nodiscard]] constexpr Tegra::Shader::Pred GetIndex() const {
         return index;
     }
 
-    bool IsNegated() const {
+    [[nodiscard]] constexpr bool IsNegated() const {
         return negated;
     }
 
@@ -489,30 +569,30 @@ private:
 class AbufNode final {
 public:
     // Initialize for standard attributes (index is explicit).
-    explicit AbufNode(Tegra::Shader::Attribute::Index index, u32 element, Node buffer = {})
-        : buffer{std::move(buffer)}, index{index}, element{element} {}
+    explicit AbufNode(Tegra::Shader::Attribute::Index index_, u32 element_, Node buffer_ = {})
+        : buffer{std::move(buffer_)}, index{index_}, element{element_} {}
 
     // Initialize for physical attributes (index is a variable value).
-    explicit AbufNode(Node physical_address, Node buffer = {})
-        : physical_address{std::move(physical_address)}, buffer{std::move(buffer)} {}
+    explicit AbufNode(Node physical_address_, Node buffer_ = {})
+        : physical_address{std::move(physical_address_)}, buffer{std::move(buffer_)} {}
 
-    Tegra::Shader::Attribute::Index GetIndex() const {
+    [[nodiscard]] Tegra::Shader::Attribute::Index GetIndex() const {
         return index;
     }
 
-    u32 GetElement() const {
+    [[nodiscard]] u32 GetElement() const {
         return element;
     }
 
-    const Node& GetBuffer() const {
+    [[nodiscard]] const Node& GetBuffer() const {
         return buffer;
     }
 
-    bool IsPhysicalBuffer() const {
+    [[nodiscard]] bool IsPhysicalBuffer() const {
         return static_cast<bool>(physical_address);
     }
 
-    const Node& GetPhysicalAddress() const {
+    [[nodiscard]] const Node& GetPhysicalAddress() const {
         return physical_address;
     }
 
@@ -523,16 +603,29 @@ private:
     u32 element{};
 };
 
+/// Patch memory (used to communicate tessellation stages).
+class PatchNode final {
+public:
+    explicit constexpr PatchNode(u32 offset_) : offset{offset_} {}
+
+    [[nodiscard]] constexpr u32 GetOffset() const {
+        return offset;
+    }
+
+private:
+    u32 offset{};
+};
+
 /// Constant buffer node, usually mapped to uniform buffers in GLSL
 class CbufNode final {
 public:
-    explicit CbufNode(u32 index, Node offset) : index{index}, offset{std::move(offset)} {}
+    explicit CbufNode(u32 index_, Node offset_) : index{index_}, offset{std::move(offset_)} {}
 
-    u32 GetIndex() const {
+    [[nodiscard]] u32 GetIndex() const {
         return index;
     }
 
-    const Node& GetOffset() const {
+    [[nodiscard]] const Node& GetOffset() const {
         return offset;
     }
 
@@ -544,9 +637,22 @@ private:
 /// Local memory node
 class LmemNode final {
 public:
-    explicit LmemNode(Node address) : address{std::move(address)} {}
+    explicit LmemNode(Node address_) : address{std::move(address_)} {}
 
-    const Node& GetAddress() const {
+    [[nodiscard]] const Node& GetAddress() const {
+        return address;
+    }
+
+private:
+    Node address;
+};
+
+/// Shared memory node
+class SmemNode final {
+public:
+    explicit SmemNode(Node address_) : address{std::move(address_)} {}
+
+    [[nodiscard]] const Node& GetAddress() const {
         return address;
     }
 
@@ -557,19 +663,19 @@ private:
 /// Global memory node
 class GmemNode final {
 public:
-    explicit GmemNode(Node real_address, Node base_address, const GlobalMemoryBase& descriptor)
-        : real_address{std::move(real_address)}, base_address{std::move(base_address)},
-          descriptor{descriptor} {}
+    explicit GmemNode(Node real_address_, Node base_address_, const GlobalMemoryBase& descriptor_)
+        : real_address{std::move(real_address_)}, base_address{std::move(base_address_)},
+          descriptor{descriptor_} {}
 
-    const Node& GetRealAddress() const {
+    [[nodiscard]] const Node& GetRealAddress() const {
         return real_address;
     }
 
-    const Node& GetBaseAddress() const {
+    [[nodiscard]] const Node& GetBaseAddress() const {
         return base_address;
     }
 
-    const GlobalMemoryBase& GetDescriptor() const {
+    [[nodiscard]] const GlobalMemoryBase& GetDescriptor() const {
         return descriptor;
     }
 
@@ -582,9 +688,9 @@ private:
 /// Commentary, can be dropped
 class CommentNode final {
 public:
-    explicit CommentNode(std::string text) : text{std::move(text)} {}
+    explicit CommentNode(std::string text_) : text{std::move(text_)} {}
 
-    const std::string& GetText() const {
+    [[nodiscard]] const std::string& GetText() const {
         return text;
     }
 

@@ -2,9 +2,12 @@
 // Licensed under GPLv2 or any later version
 // Refer to the license.txt file included.
 
+#include <cstring>
+
 #include "common/string_util.h"
 #include "core/file_sys/kernel_executable.h"
 #include "core/file_sys/vfs_offset.h"
+#include "core/loader/loader.h"
 
 namespace FileSys {
 
@@ -147,7 +150,7 @@ std::vector<u32> KIP::GetKernelCapabilities() const {
 }
 
 s32 KIP::GetMainThreadPriority() const {
-    return header.main_thread_priority;
+    return static_cast<s32>(header.main_thread_priority);
 }
 
 u32 KIP::GetMainThreadStackSize() const {

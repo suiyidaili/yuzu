@@ -12,7 +12,7 @@
 
 namespace Service::SM {
 
-void Controller::ConvertSessionToDomain(Kernel::HLERequestContext& ctx) {
+void Controller::ConvertCurrentObjectToDomain(Kernel::HLERequestContext& ctx) {
     ASSERT_MSG(ctx.Session()->IsSession(), "Session is already a domain");
     LOG_DEBUG(Service, "called, server_session={}", ctx.Session()->GetObjectId());
     ctx.Session()->ConvertToDomain();
@@ -22,7 +22,7 @@ void Controller::ConvertSessionToDomain(Kernel::HLERequestContext& ctx) {
     rb.Push<u32>(1); // Converted sessions start with 1 request handler
 }
 
-void Controller::DuplicateSession(Kernel::HLERequestContext& ctx) {
+void Controller::CloneCurrentObject(Kernel::HLERequestContext& ctx) {
     // TODO(bunnei): This is just creating a new handle to the same Session. I assume this is wrong
     // and that we probably want to actually make an entirely new Session, but we still need to
     // verify this on hardware.
@@ -30,16 +30,13 @@ void Controller::DuplicateSession(Kernel::HLERequestContext& ctx) {
 
     IPC::ResponseBuilder rb{ctx, 2, 0, 1, IPC::ResponseBuilder::Flags::AlwaysMoveHandles};
     rb.Push(RESULT_SUCCESS);
-    Kernel::SharedPtr<Kernel::ClientSession> session{ctx.Session()->GetParent()->client};
-    rb.PushMoveObjects(session);
-
-    LOG_DEBUG(Service, "session={}", session->GetObjectId());
+    rb.PushMoveObjects(ctx.Session()->GetParent()->Client());
 }
 
-void Controller::DuplicateSessionEx(Kernel::HLERequestContext& ctx) {
-    LOG_WARNING(Service, "(STUBBED) called, using DuplicateSession");
+void Controller::CloneCurrentObjectEx(Kernel::HLERequestContext& ctx) {
+    LOG_WARNING(Service, "(STUBBED) called, using CloneCurrentObject");
 
-    DuplicateSession(ctx);
+    CloneCurrentObject(ctx);
 }
 
 void Controller::QueryPointerBufferSize(Kernel::HLERequestContext& ctx) {
@@ -47,16 +44,17 @@ void Controller::QueryPointerBufferSize(Kernel::HLERequestContext& ctx) {
 
     IPC::ResponseBuilder rb{ctx, 3};
     rb.Push(RESULT_SUCCESS);
-    rb.Push<u16>(0x500);
+    rb.Push<u16>(0x1000);
 }
 
-Controller::Controller() : ServiceFramework("IpcController") {
+// https://switchbrew.org/wiki/IPC_Marshalling
+Controller::Controller(Core::System& system_) : ServiceFramework{system_, "IpcController"} {
     static const FunctionInfo functions[] = {
-        {0x00000000, &Controller::ConvertSessionToDomain, "ConvertSessionToDomain"},
-        {0x00000001, nullptr, "ConvertDomainToSession"},
-        {0x00000002, &Controller::DuplicateSession, "DuplicateSession"},
-        {0x00000003, &Controller::QueryPointerBufferSize, "QueryPointerBufferSize"},
-        {0x00000004, &Controller::DuplicateSessionEx, "DuplicateSessionEx"},
+        {0, &Controller::ConvertCurrentObjectToDomain, "ConvertCurrentObjectToDomain"},
+        {1, nullptr, "CopyFromCurrentDomain"},
+        {2, &Controller::CloneCurrentObject, "CloneCurrentObject"},
+        {3, &Controller::QueryPointerBufferSize, "QueryPointerBufferSize"},
+        {4, &Controller::CloneCurrentObjectEx, "CloneCurrentObjectEx"},
     };
     RegisterHandlers(functions);
 }

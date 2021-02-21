@@ -9,6 +9,7 @@
 #include "common/common_types.h"
 #include "common/swap.h"
 #include "core/hle/service/nvdrv/nvdata.h"
+#include "core/hle/service/service.h"
 
 namespace Core {
 class System;
@@ -20,26 +21,40 @@ namespace Service::Nvidia::Devices {
 /// implement the ioctl interface.
 class nvdevice {
 public:
-    explicit nvdevice(Core::System& system) : system{system} {};
+    explicit nvdevice(Core::System& system) : system{system} {}
     virtual ~nvdevice() = default;
-    union Ioctl {
-        u32_le raw;
-        BitField<0, 8, u32> cmd;
-        BitField<8, 8, u32> group;
-        BitField<16, 14, u32> length;
-        BitField<30, 1, u32> is_in;
-        BitField<31, 1, u32> is_out;
-    };
 
     /**
-     * Handles an ioctl request.
+     * Handles an ioctl1 request.
      * @param command The ioctl command id.
      * @param input A buffer containing the input data for the ioctl.
      * @param output A buffer where the output data will be written to.
      * @returns The result code of the ioctl.
      */
-    virtual u32 ioctl(Ioctl command, const std::vector<u8>& input, std::vector<u8>& output,
-                      IoctlCtrl& ctrl) = 0;
+    virtual NvResult Ioctl1(Ioctl command, const std::vector<u8>& input,
+                            std::vector<u8>& output) = 0;
+
+    /**
+     * Handles an ioctl2 request.
+     * @param command The ioctl command id.
+     * @param input A buffer containing the input data for the ioctl.
+     * @param inline_input A buffer containing the input data for the ioctl which has been inlined.
+     * @param output A buffer where the output data will be written to.
+     * @returns The result code of the ioctl.
+     */
+    virtual NvResult Ioctl2(Ioctl command, const std::vector<u8>& input,
+                            const std::vector<u8>& inline_input, std::vector<u8>& output) = 0;
+
+    /**
+     * Handles an ioctl3 request.
+     * @param command The ioctl command id.
+     * @param input A buffer containing the input data for the ioctl.
+     * @param output A buffer where the output data will be written to.
+     * @param inline_output A buffer where the inlined output data will be written to.
+     * @returns The result code of the ioctl.
+     */
+    virtual NvResult Ioctl3(Ioctl command, const std::vector<u8>& input, std::vector<u8>& output,
+                            std::vector<u8>& inline_output) = 0;
 
 protected:
     Core::System& system;

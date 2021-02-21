@@ -20,9 +20,9 @@ namespace Service::AM::Applets {
 struct ShowError {
     u8 mode;
     bool jump;
-    INSERT_PADDING_BYTES(4);
+    INSERT_PADDING_BYTES_NOINIT(4);
     bool use_64bit_error_code;
-    INSERT_PADDING_BYTES(1);
+    INSERT_PADDING_BYTES_NOINIT(1);
     u64 error_code_64;
     u32 error_code_32;
 };
@@ -32,7 +32,7 @@ static_assert(sizeof(ShowError) == 0x14, "ShowError has incorrect size.");
 struct ShowErrorRecord {
     u8 mode;
     bool jump;
-    INSERT_PADDING_BYTES(6);
+    INSERT_PADDING_BYTES_NOINIT(6);
     u64 error_code_64;
     u64 posix_time;
 };
@@ -41,7 +41,7 @@ static_assert(sizeof(ShowErrorRecord) == 0x18, "ShowErrorRecord has incorrect si
 struct SystemErrorArg {
     u8 mode;
     bool jump;
-    INSERT_PADDING_BYTES(6);
+    INSERT_PADDING_BYTES_NOINIT(6);
     u64 error_code_64;
     std::array<char, 8> language_code;
     std::array<char, 0x800> main_text;
@@ -52,7 +52,7 @@ static_assert(sizeof(SystemErrorArg) == 0x1018, "SystemErrorArg has incorrect si
 struct ApplicationErrorArg {
     u8 mode;
     bool jump;
-    INSERT_PADDING_BYTES(6);
+    INSERT_PADDING_BYTES_NOINIT(6);
     u32 error_code;
     std::array<char, 8> language_code;
     std::array<char, 0x800> main_text;
@@ -65,6 +65,7 @@ union Error::ErrorArguments {
     ShowErrorRecord error_record;
     SystemErrorArg system_error;
     ApplicationErrorArg application_error;
+    std::array<u8, 0x1018> raw{};
 };
 
 namespace {
@@ -86,7 +87,7 @@ ResultCode Decode64BitError(u64 error) {
 } // Anonymous namespace
 
 Error::Error(Core::System& system_, const Core::Frontend::ErrorApplet& frontend_)
-    : Applet{system_.Kernel()}, frontend(frontend_), system{system_} {}
+    : Applet{system_.Kernel()}, frontend{frontend_}, system{system_} {}
 
 Error::~Error() = default;
 
@@ -124,7 +125,7 @@ void Error::Initialize() {
         error_code = Decode64BitError(args->error_record.error_code_64);
         break;
     default:
-        UNIMPLEMENTED_MSG("Unimplemented LibAppletError mode={:02X}!", static_cast<u8>(mode));
+        UNIMPLEMENTED_MSG("Unimplemented LibAppletError mode={:02X}!", mode);
     }
 }
 
@@ -178,14 +179,14 @@ void Error::Execute() {
             error_code, std::chrono::seconds{args->error_record.posix_time}, callback);
         break;
     default:
-        UNIMPLEMENTED_MSG("Unimplemented LibAppletError mode={:02X}!", static_cast<u8>(mode));
+        UNIMPLEMENTED_MSG("Unimplemented LibAppletError mode={:02X}!", mode);
         DisplayCompleted();
     }
 }
 
 void Error::DisplayCompleted() {
     complete = true;
-    broker.PushNormalDataFromApplet(IStorage{{}});
+    broker.PushNormalDataFromApplet(std::make_shared<IStorage>(system, std::vector<u8>{}));
     broker.SignalStateChanged();
 }
 

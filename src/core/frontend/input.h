@@ -15,12 +15,38 @@
 
 namespace Input {
 
+enum class AnalogDirection : u8 {
+    RIGHT,
+    LEFT,
+    UP,
+    DOWN,
+};
+struct AnalogProperties {
+    float deadzone;
+    float range;
+    float threshold;
+};
+
 /// An abstract class template for an input device (a button, an analog input, etc.).
 template <typename StatusType>
 class InputDevice {
 public:
     virtual ~InputDevice() = default;
     virtual StatusType GetStatus() const {
+        return {};
+    }
+    virtual StatusType GetRawStatus() const {
+        return GetStatus();
+    }
+    virtual AnalogProperties GetAnalogProperties() const {
+        return {};
+    }
+    virtual bool GetAnalogDirectionStatus([[maybe_unused]] AnalogDirection direction) const {
+        return {};
+    }
+    virtual bool SetRumblePlay([[maybe_unused]] f32 amp_low, [[maybe_unused]] f32 freq_low,
+                               [[maybe_unused]] f32 amp_high,
+                               [[maybe_unused]] f32 freq_high) const {
         return {};
     }
 };
@@ -109,11 +135,18 @@ using ButtonDevice = InputDevice<bool>;
 using AnalogDevice = InputDevice<std::tuple<float, float>>;
 
 /**
- * A motion device is an input device that returns a tuple of accelerometer state vector and
- * gyroscope state vector.
+ * A vibration device is an input device that returns an unsigned byte as status.
+ * It represents whether the vibration device supports vibration or not.
+ * If the status returns 1, it supports vibration. Otherwise, it does not support vibration.
+ */
+using VibrationDevice = InputDevice<u8>;
+
+/**
+ * A motion status is an object that returns a tuple of accelerometer state vector,
+ * gyroscope state vector, rotation state vector and orientation state matrix.
  *
  * For both vectors:
- *   x+ is the same direction as LEFT on D-pad.
+ *   x+ is the same direction as RIGHT on D-pad.
  *   y+ is normal to the touch screen, pointing outward.
  *   z+ is the same direction as UP on D-pad.
  *
@@ -123,14 +156,34 @@ using AnalogDevice = InputDevice<std::tuple<float, float>>;
  * For gyroscope state vector:
  *   Orientation is determined by right-hand rule.
  *   Units: deg/sec
+ *
+ * For rotation state vector
+ *   Units: rotations
+ *
+ * For orientation state matrix
+ *   x vector
+ *   y vector
+ *   z vector
  */
-using MotionDevice = InputDevice<std::tuple<Common::Vec3<float>, Common::Vec3<float>>>;
+using MotionStatus = std::tuple<Common::Vec3<float>, Common::Vec3<float>, Common::Vec3<float>,
+                                std::array<Common::Vec3f, 3>>;
 
 /**
- * A touch device is an input device that returns a tuple of two floats and a bool. The floats are
- * x and y coordinates in the range 0.0 - 1.0, and the bool indicates whether it is pressed.
+ * A motion device is an input device that returns a motion status object
  */
-using TouchDevice = InputDevice<std::tuple<float, float, bool>>;
+using MotionDevice = InputDevice<MotionStatus>;
+
+/**
+ * A touch status is an object that returns an array of 16 tuple elements of two floats and a bool.
+ * The floats are x and y coordinates in the range 0.0 - 1.0, and the bool indicates whether it is
+ * pressed.
+ */
+using TouchStatus = std::array<std::tuple<float, float, bool>, 16>;
+
+/**
+ * A touch device is an input device that returns a touch status object
+ */
+using TouchDevice = InputDevice<TouchStatus>;
 
 /**
  * A mouse device is an input device that returns a tuple of two floats and four ints.

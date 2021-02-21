@@ -10,20 +10,28 @@
 
 namespace VideoCommon::Shader {
 
+using std::move;
 using Tegra::Shader::Instruction;
 using Tegra::Shader::OpCode;
 using Tegra::Shader::Pred;
 using Tegra::Shader::VideoType;
 using Tegra::Shader::VmadShr;
+using Tegra::Shader::VmnmxOperation;
+using Tegra::Shader::VmnmxType;
 
 u32 ShaderIR::DecodeVideo(NodeBlock& bb, u32 pc) {
     const Instruction instr = {program_code[pc]};
     const auto opcode = OpCode::Decode(instr);
 
+    if (opcode->get().GetId() == OpCode::Id::VMNMX) {
+        DecodeVMNMX(bb, instr);
+        return pc;
+    }
+
     const Node op_a =
         GetVideoOperand(GetRegister(instr.gpr8), instr.video.is_byte_chunk_a, instr.video.signed_a,
                         instr.video.type_a, instr.video.byte_height_a);
-    const Node op_b = [&]() {
+    const Node op_b = [this, instr] {
         if (instr.video.use_register_b) {
             return GetVideoOperand(GetRegister(instr.gpr20), instr.video.is_byte_chunk_b,
                                    instr.video.signed_b, instr.video.type_b,
@@ -83,30 +91,79 @@ u32 ShaderIR::DecodeVideo(NodeBlock& bb, u32 pc) {
     return pc;
 }
 
-Node ShaderIR::GetVideoOperand(Node op, bool is_chunk, bool is_signed,
-                               Tegra::Shader::VideoType type, u64 byte_height) {
+Node ShaderIR::GetVideoOperand(Node op, bool is_chunk, bool is_signed, VideoType type,
+                               u64 byte_height) {
     if (!is_chunk) {
         return BitfieldExtract(op, static_cast<u32>(byte_height * 8), 8);
     }
-    const Node zero = Immediate(0);
 
     switch (type) {
-    case Tegra::Shader::VideoType::Size16_Low:
+    case VideoType::Size16_Low:
         return BitfieldExtract(op, 0, 16);
-    case Tegra::Shader::VideoType::Size16_High:
+    case VideoType::Size16_High:
         return BitfieldExtract(op, 16, 16);
-    case Tegra::Shader::VideoType::Size32:
+    case VideoType::Size32:
         // TODO(Rodrigo): From my hardware tests it becomes a bit "mad" when this type is used
         // (1 * 1 + 0 == 0x5b800000). Until a better explanation is found: abort.
         UNIMPLEMENTED();
-        return zero;
-    case Tegra::Shader::VideoType::Invalid:
+        return Immediate(0);
+    case VideoType::Invalid:
         UNREACHABLE_MSG("Invalid instruction encoding");
-        return zero;
+        return Immediate(0);
     default:
         UNREACHABLE();
-        return zero;
+        return Immediate(0);
     }
+}
+
+void ShaderIR::DecodeVMNMX(NodeBlock& bb, Tegra::Shader::Instruction instr) {
+    UNIMPLEMENTED_IF(!instr.vmnmx.is_op_b_register);
+    UNIMPLEMENTED_IF(instr.vmnmx.SourceFormatA() != VmnmxType::Bits32);
+    UNIMPLEMENTED_IF(instr.vmnmx.SourceFormatB() != VmnmxType::Bits32);
+    UNIMPLEMENTED_IF(instr.vmnmx.is_src_a_signed != instr.vmnmx.is_src_b_signed);
+    UNIMPLEMENTED_IF(instr.vmnmx.sat);
+    UNIMPLEMENTED_IF(instr.generates_cc);
+
+    Node op_a = GetRegister(instr.gpr8);
+    Node op_b = GetRegister(instr.gpr20);
+    Node op_c = GetRegister(instr.gpr39);
+
+    const bool is_oper1_signed = instr.vmnmx.is_src_a_signed; // Stubbed
+    const bool is_oper2_signed = instr.vmnmx.is_dest_signed;
+
+    const auto operation_a = instr.vmnmx.mx ? OperationCode::IMax : OperationCode::IMin;
+    Node value = SignedOperation(operation_a, is_oper1_signed, move(op_a), move(op_b));
+
+    switch (instr.vmnmx.operation) {
+    case VmnmxOperation::Mrg_16H:
+        value = BitfieldInsert(move(op_c), move(value), 16, 16);
+        break;
+    case VmnmxOperation::Mrg_16L:
+        value = BitfieldInsert(move(op_c), move(value), 0, 16);
+        break;
+    case VmnmxOperation::Mrg_8B0:
+        value = BitfieldInsert(move(op_c), move(value), 0, 8);
+        break;
+    case VmnmxOperation::Mrg_8B2:
+        value = BitfieldInsert(move(op_c), move(value), 16, 8);
+        break;
+    case VmnmxOperation::Acc:
+        value = Operation(OperationCode::IAdd, move(value), move(op_c));
+        break;
+    case VmnmxOperation::Min:
+        value = SignedOperation(OperationCode::IMin, is_oper2_signed, move(value), move(op_c));
+        break;
+    case VmnmxOperation::Max:
+        value = SignedOperation(OperationCode::IMax, is_oper2_signed, move(value), move(op_c));
+        break;
+    case VmnmxOperation::Nop:
+        break;
+    default:
+        UNREACHABLE();
+        break;
+    }
+
+    SetRegister(bb, instr.gpr0, move(value));
 }
 
 } // namespace VideoCommon::Shader

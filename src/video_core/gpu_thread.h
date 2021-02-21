@@ -12,7 +12,7 @@
 #include <variant>
 
 #include "common/threadsafe_queue.h"
-#include "video_core/gpu.h"
+#include "video_core/framebuffer_config.h"
 
 namespace Tegra {
 struct FramebufferConfig;
@@ -20,11 +20,16 @@ class DmaPusher;
 } // namespace Tegra
 
 namespace Core {
+namespace Frontend {
+class GraphicsContext;
+}
 class System;
-namespace Timing {
-struct EventType;
-} // namespace Timing
 } // namespace Core
+
+namespace VideoCore {
+class RasterizerInterface;
+class RendererBase;
+} // namespace VideoCore
 
 namespace VideoCommon::GPUThread {
 
@@ -33,53 +38,68 @@ struct EndProcessingCommand final {};
 
 /// Command to signal to the GPU thread that a command list is ready for processing
 struct SubmitListCommand final {
-    explicit SubmitListCommand(Tegra::CommandList&& entries) : entries{std::move(entries)} {}
+    explicit SubmitListCommand(Tegra::CommandList&& entries_) : entries{std::move(entries_)} {}
 
     Tegra::CommandList entries;
 };
 
+/// Command to signal to the GPU thread that a cdma command list is ready for processing
+struct SubmitChCommandEntries final {
+    explicit SubmitChCommandEntries(Tegra::ChCommandHeaderList&& entries_)
+        : entries{std::move(entries_)} {}
+
+    Tegra::ChCommandHeaderList entries;
+};
+
 /// Command to signal to the GPU thread that a swap buffers is pending
 struct SwapBuffersCommand final {
-    explicit SwapBuffersCommand(std::optional<const Tegra::FramebufferConfig> framebuffer)
-        : framebuffer{std::move(framebuffer)} {}
+    explicit SwapBuffersCommand(std::optional<const Tegra::FramebufferConfig> framebuffer_)
+        : framebuffer{std::move(framebuffer_)} {}
 
     std::optional<Tegra::FramebufferConfig> framebuffer;
 };
 
 /// Command to signal to the GPU thread to flush a region
 struct FlushRegionCommand final {
-    explicit constexpr FlushRegionCommand(CacheAddr addr, u64 size) : addr{addr}, size{size} {}
+    explicit constexpr FlushRegionCommand(VAddr addr_, u64 size_) : addr{addr_}, size{size_} {}
 
-    CacheAddr addr;
+    VAddr addr;
     u64 size;
 };
 
 /// Command to signal to the GPU thread to invalidate a region
 struct InvalidateRegionCommand final {
-    explicit constexpr InvalidateRegionCommand(CacheAddr addr, u64 size) : addr{addr}, size{size} {}
+    explicit constexpr InvalidateRegionCommand(VAddr addr_, u64 size_) : addr{addr_}, size{size_} {}
 
-    CacheAddr addr;
+    VAddr addr;
     u64 size;
 };
 
 /// Command to signal to the GPU thread to flush and invalidate a region
 struct FlushAndInvalidateRegionCommand final {
-    explicit constexpr FlushAndInvalidateRegionCommand(CacheAddr addr, u64 size)
-        : addr{addr}, size{size} {}
+    explicit constexpr FlushAndInvalidateRegionCommand(VAddr addr_, u64 size_)
+        : addr{addr_}, size{size_} {}
 
-    CacheAddr addr;
+    VAddr addr;
     u64 size;
 };
 
+/// Command called within the gpu, to schedule actions after a command list end
+struct OnCommandListEndCommand final {};
+
+/// Command to make the gpu look into pending requests
+struct GPUTickCommand final {};
+
 using CommandData =
-    std::variant<EndProcessingCommand, SubmitListCommand, SwapBuffersCommand, FlushRegionCommand,
-                 InvalidateRegionCommand, FlushAndInvalidateRegionCommand>;
+    std::variant<EndProcessingCommand, SubmitListCommand, SubmitChCommandEntries,
+                 SwapBuffersCommand, FlushRegionCommand, InvalidateRegionCommand,
+                 FlushAndInvalidateRegionCommand, OnCommandListEndCommand, GPUTickCommand>;
 
 struct CommandDataContainer {
     CommandDataContainer() = default;
 
-    CommandDataContainer(CommandData&& data, u64 next_fence)
-        : data{std::move(data)}, fence{next_fence} {}
+    explicit CommandDataContainer(CommandData&& data_, u64 next_fence_)
+        : data{std::move(data_)}, fence{next_fence_} {}
 
     CommandData data;
     u64 fence{};
@@ -89,9 +109,7 @@ struct CommandDataContainer {
 struct SynchState final {
     std::atomic_bool is_running{true};
 
-    void WaitForSynchronization(u64 fence);
-
-    using CommandQueue = Common::SPSCQueue<CommandDataContainer>;
+    using CommandQueue = Common::MPSCQueue<CommandDataContainer>;
     CommandQueue queue;
     u64 last_fence{};
     std::atomic<u64> signaled_fence{};
@@ -100,37 +118,46 @@ struct SynchState final {
 /// Class used to manage the GPU thread
 class ThreadManager final {
 public:
-    explicit ThreadManager(Core::System& system);
+    explicit ThreadManager(Core::System& system_, bool is_async_);
     ~ThreadManager();
 
     /// Creates and starts the GPU thread.
-    void StartThread(VideoCore::RendererBase& renderer, Tegra::DmaPusher& dma_pusher);
+    void StartThread(VideoCore::RendererBase& renderer, Core::Frontend::GraphicsContext& context,
+                     Tegra::DmaPusher& dma_pusher, Tegra::CDmaPusher& cdma_pusher);
 
     /// Push GPU command entries to be processed
     void SubmitList(Tegra::CommandList&& entries);
+
+    /// Push GPU CDMA command buffer entries to be processed
+    void SubmitCommandBuffer(Tegra::ChCommandHeaderList&& entries);
 
     /// Swap buffers (render frame)
     void SwapBuffers(const Tegra::FramebufferConfig* framebuffer);
 
     /// Notify rasterizer that any caches of the specified region should be flushed to Switch memory
-    void FlushRegion(CacheAddr addr, u64 size);
+    void FlushRegion(VAddr addr, u64 size);
 
     /// Notify rasterizer that any caches of the specified region should be invalidated
-    void InvalidateRegion(CacheAddr addr, u64 size);
+    void InvalidateRegion(VAddr addr, u64 size);
 
     /// Notify rasterizer that any caches of the specified region should be flushed and invalidated
-    void FlushAndInvalidateRegion(CacheAddr addr, u64 size);
+    void FlushAndInvalidateRegion(VAddr addr, u64 size);
+
+    // Wait until the gpu thread is idle.
+    void WaitIdle() const;
+
+    void OnCommandListEnd();
 
 private:
     /// Pushes a command to be executed by the GPU thread
     u64 PushCommand(CommandData&& command_data);
 
-private:
-    SynchState state;
     Core::System& system;
-    Core::Timing::EventType* synchronization_event{};
+    const bool is_async;
+    VideoCore::RasterizerInterface* rasterizer = nullptr;
+
+    SynchState state;
     std::thread thread;
-    std::thread::id thread_id;
 };
 
 } // namespace VideoCommon::GPUThread

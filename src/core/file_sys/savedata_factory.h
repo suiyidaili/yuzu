@@ -12,6 +12,10 @@
 #include "core/file_sys/vfs.h"
 #include "core/hle/result.h"
 
+namespace Core {
+class System;
+}
+
 namespace FileSys {
 
 enum class SaveDataSpaceId : u8 {
@@ -21,6 +25,7 @@ enum class SaveDataSpaceId : u8 {
     TemporaryStorage = 3,
     SdCardUser = 4,
     ProperSystem = 100,
+    SafeMode = 101,
 };
 
 enum class SaveDataType : u8 {
@@ -30,28 +35,50 @@ enum class SaveDataType : u8 {
     DeviceSaveData = 3,
     TemporaryStorage = 4,
     CacheStorage = 5,
+    SystemBcat = 6,
 };
 
 enum class SaveDataRank : u8 {
-    Primary,
-    Secondary,
+    Primary = 0,
+    Secondary = 1,
 };
 
-struct SaveDataDescriptor {
-    u64_le title_id;
+enum class SaveDataFlags : u32 {
+    None = (0 << 0),
+    KeepAfterResettingSystemSaveData = (1 << 0),
+    KeepAfterRefurbishment = (1 << 1),
+    KeepAfterResettingSystemSaveDataWithoutUserSaveData = (1 << 2),
+    NeedsSecureDelete = (1 << 3),
+};
+
+struct SaveDataAttribute {
+    u64 title_id;
     u128 user_id;
-    u64_le save_id;
+    u64 save_id;
     SaveDataType type;
     SaveDataRank rank;
-    u16_le index;
-    INSERT_PADDING_BYTES(4);
-    u64_le zero_1;
-    u64_le zero_2;
-    u64_le zero_3;
+    u16 index;
+    INSERT_PADDING_BYTES_NOINIT(4);
+    u64 zero_1;
+    u64 zero_2;
+    u64 zero_3;
 
     std::string DebugInfo() const;
 };
-static_assert(sizeof(SaveDataDescriptor) == 0x40, "SaveDataDescriptor has incorrect size.");
+static_assert(sizeof(SaveDataAttribute) == 0x40, "SaveDataAttribute has incorrect size.");
+
+struct SaveDataExtraData {
+    SaveDataAttribute attr;
+    u64 owner_id;
+    s64 timestamp;
+    SaveDataFlags flags;
+    INSERT_PADDING_BYTES_NOINIT(4);
+    s64 available_size;
+    s64 journal_size;
+    s64 commit_id;
+    std::array<u8, 0x190> unused;
+};
+static_assert(sizeof(SaveDataExtraData) == 0x200, "SaveDataExtraData has incorrect size.");
 
 struct SaveDataSize {
     u64 normal;
@@ -61,22 +88,25 @@ struct SaveDataSize {
 /// File system interface to the SaveData archive
 class SaveDataFactory {
 public:
-    explicit SaveDataFactory(VirtualDir dir);
+    explicit SaveDataFactory(Core::System& system_, VirtualDir save_directory_);
     ~SaveDataFactory();
 
-    ResultVal<VirtualDir> Open(SaveDataSpaceId space, const SaveDataDescriptor& meta);
+    ResultVal<VirtualDir> Create(SaveDataSpaceId space, const SaveDataAttribute& meta) const;
+    ResultVal<VirtualDir> Open(SaveDataSpaceId space, const SaveDataAttribute& meta) const;
 
     VirtualDir GetSaveDataSpaceDirectory(SaveDataSpaceId space) const;
 
     static std::string GetSaveDataSpaceIdPath(SaveDataSpaceId space);
-    static std::string GetFullPath(SaveDataSpaceId space, SaveDataType type, u64 title_id,
-                                   u128 user_id, u64 save_id);
+    static std::string GetFullPath(Core::System& system, SaveDataSpaceId space, SaveDataType type,
+                                   u64 title_id, u128 user_id, u64 save_id);
 
     SaveDataSize ReadSaveDataSize(SaveDataType type, u64 title_id, u128 user_id) const;
-    void WriteSaveDataSize(SaveDataType type, u64 title_id, u128 user_id, SaveDataSize new_value);
+    void WriteSaveDataSize(SaveDataType type, u64 title_id, u128 user_id,
+                           SaveDataSize new_value) const;
 
 private:
     VirtualDir dir;
+    Core::System& system;
 };
 
 } // namespace FileSys

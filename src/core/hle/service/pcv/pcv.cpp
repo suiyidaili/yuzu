@@ -12,7 +12,7 @@ namespace Service::PCV {
 
 class PCV final : public ServiceFramework<PCV> {
 public:
-    explicit PCV() : ServiceFramework{"pcv"} {
+    explicit PCV(Core::System& system_) : ServiceFramework{system_, "pcv"} {
         // clang-format off
         static const FunctionInfo functions[] = {
             {0, nullptr, "SetPowerEnabled"},
@@ -42,6 +42,9 @@ public:
             {24, nullptr, "GetModuleStateTable"},
             {25, nullptr, "GetPowerDomainStateTable"},
             {26, nullptr, "GetFuseInfo"},
+            {27, nullptr, "GetDramId"},
+            {28, nullptr, "IsPoweredOn"},
+            {29, nullptr, "GetVoltage"},
         };
         // clang-format on
 
@@ -51,7 +54,7 @@ public:
 
 class PCV_ARB final : public ServiceFramework<PCV_ARB> {
 public:
-    explicit PCV_ARB() : ServiceFramework{"pcv:arb"} {
+    explicit PCV_ARB(Core::System& system_) : ServiceFramework{system_, "pcv:arb"} {
         // clang-format off
         static const FunctionInfo functions[] = {
             {0, nullptr, "ReleaseControl"},
@@ -64,7 +67,7 @@ public:
 
 class PCV_IMM final : public ServiceFramework<PCV_IMM> {
 public:
-    explicit PCV_IMM() : ServiceFramework{"pcv:imm"} {
+    explicit PCV_IMM(Core::System& system_) : ServiceFramework{system_, "pcv:imm"} {
         // clang-format off
         static const FunctionInfo functions[] = {
             {0, nullptr, "SetClockRate"},
@@ -75,10 +78,10 @@ public:
     }
 };
 
-void InstallInterfaces(SM::ServiceManager& sm) {
-    std::make_shared<PCV>()->InstallAsService(sm);
-    std::make_shared<PCV_ARB>()->InstallAsService(sm);
-    std::make_shared<PCV_IMM>()->InstallAsService(sm);
+void InstallInterfaces(SM::ServiceManager& sm, Core::System& system) {
+    std::make_shared<PCV>(system)->InstallAsService(sm);
+    std::make_shared<PCV_ARB>(system)->InstallAsService(sm);
+    std::make_shared<PCV_IMM>(system)->InstallAsService(sm);
 }
 
 } // namespace Service::PCV

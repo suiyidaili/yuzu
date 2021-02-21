@@ -8,6 +8,7 @@
 #include "core/core.h"
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
+#include "video_core/engines/shader_type.h"
 #include "video_core/memory_manager.h"
 #include "video_core/rasterizer_interface.h"
 #include "video_core/renderer_base.h"
@@ -15,30 +16,29 @@
 
 namespace Tegra::Engines {
 
-KeplerCompute::KeplerCompute(Core::System& system, VideoCore::RasterizerInterface& rasterizer,
-                             MemoryManager& memory_manager)
-    : system{system}, rasterizer{rasterizer}, memory_manager{memory_manager}, upload_state{
-                                                                                  memory_manager,
-                                                                                  regs.upload} {}
+KeplerCompute::KeplerCompute(Core::System& system_, MemoryManager& memory_manager_)
+    : system{system_}, memory_manager{memory_manager_}, upload_state{memory_manager, regs.upload} {}
 
 KeplerCompute::~KeplerCompute() = default;
 
-void KeplerCompute::CallMethod(const GPU::MethodCall& method_call) {
-    ASSERT_MSG(method_call.method < Regs::NUM_REGS,
+void KeplerCompute::BindRasterizer(VideoCore::RasterizerInterface* rasterizer_) {
+    rasterizer = rasterizer_;
+}
+
+void KeplerCompute::CallMethod(u32 method, u32 method_argument, bool is_last_call) {
+    ASSERT_MSG(method < Regs::NUM_REGS,
                "Invalid KeplerCompute register, increase the size of the Regs structure");
 
-    regs.reg_array[method_call.method] = method_call.argument;
+    regs.reg_array[method] = method_argument;
 
-    switch (method_call.method) {
+    switch (method) {
     case KEPLER_COMPUTE_REG_INDEX(exec_upload): {
         upload_state.ProcessExec(regs.exec_upload.linear != 0);
         break;
     }
     case KEPLER_COMPUTE_REG_INDEX(data_upload): {
-        const bool is_last_call = method_call.IsLastCall();
-        upload_state.ProcessData(method_call.argument, is_last_call);
+        upload_state.ProcessData(method_argument, is_last_call);
         if (is_last_call) {
-            system.GPU().Maxwell3D().dirty.OnMemoryWrite();
         }
         break;
     }
@@ -50,31 +50,49 @@ void KeplerCompute::CallMethod(const GPU::MethodCall& method_call) {
     }
 }
 
-Tegra::Texture::FullTextureInfo KeplerCompute::GetTexture(std::size_t offset) const {
-    const std::bitset<8> cbuf_mask = launch_description.const_buffer_enable_mask.Value();
-    ASSERT(cbuf_mask[regs.tex_cb_index]);
-
-    const auto& texinfo = launch_description.const_buffer_config[regs.tex_cb_index];
-    ASSERT(texinfo.Address() != 0);
-
-    const GPUVAddr address = texinfo.Address() + offset * sizeof(Texture::TextureHandle);
-    ASSERT(address < texinfo.Address() + texinfo.size);
-
-    const Texture::TextureHandle tex_handle{memory_manager.Read<u32>(address)};
-    return GetTextureInfo(tex_handle, offset);
+void KeplerCompute::CallMultiMethod(u32 method, const u32* base_start, u32 amount,
+                                    u32 methods_pending) {
+    for (std::size_t i = 0; i < amount; i++) {
+        CallMethod(method, base_start[i], methods_pending - static_cast<u32>(i) <= 1);
+    }
 }
 
-Texture::FullTextureInfo KeplerCompute::GetTextureInfo(const Texture::TextureHandle tex_handle,
-                                                       std::size_t offset) const {
-    return Texture::FullTextureInfo{static_cast<u32>(offset), GetTICEntry(tex_handle.tic_id),
-                                    GetTSCEntry(tex_handle.tsc_id)};
-}
-
-u32 KeplerCompute::AccessConstBuffer32(u64 const_buffer, u64 offset) const {
+u32 KeplerCompute::AccessConstBuffer32(ShaderType stage, u64 const_buffer, u64 offset) const {
+    ASSERT(stage == ShaderType::Compute);
     const auto& buffer = launch_description.const_buffer_config[const_buffer];
     u32 result;
     std::memcpy(&result, memory_manager.GetPointer(buffer.Address() + offset), sizeof(u32));
     return result;
+}
+
+SamplerDescriptor KeplerCompute::AccessBoundSampler(ShaderType stage, u64 offset) const {
+    return AccessBindlessSampler(stage, regs.tex_cb_index, offset * sizeof(Texture::TextureHandle));
+}
+
+SamplerDescriptor KeplerCompute::AccessBindlessSampler(ShaderType stage, u64 const_buffer,
+                                                       u64 offset) const {
+    ASSERT(stage == ShaderType::Compute);
+    const auto& tex_info_buffer = launch_description.const_buffer_config[const_buffer];
+    const GPUVAddr tex_info_address = tex_info_buffer.Address() + offset;
+    return AccessSampler(memory_manager.Read<u32>(tex_info_address));
+}
+
+SamplerDescriptor KeplerCompute::AccessSampler(u32 handle) const {
+    const Texture::TextureHandle tex_handle{handle};
+    const Texture::TICEntry tic = GetTICEntry(tex_handle.tic_id);
+    const Texture::TSCEntry tsc = GetTSCEntry(tex_handle.tsc_id);
+
+    SamplerDescriptor result = SamplerDescriptor::FromTIC(tic);
+    result.is_shadow.Assign(tsc.depth_compare_enabled.Value());
+    return result;
+}
+
+VideoCore::GuestDriverProfile& KeplerCompute::AccessGuestDriverProfile() {
+    return rasterizer->AccessGuestDriverProfile();
+}
+
+const VideoCore::GuestDriverProfile& KeplerCompute::AccessGuestDriverProfile() const {
+    return rasterizer->AccessGuestDriverProfile();
 }
 
 void KeplerCompute::ProcessLaunch() {
@@ -85,7 +103,7 @@ void KeplerCompute::ProcessLaunch() {
     const GPUVAddr code_addr = regs.code_loc.Address() + launch_description.program_start;
     LOG_TRACE(HW_GPU, "Compute invocation launched at address 0x{:016x}", code_addr);
 
-    rasterizer.DispatchCompute(code_addr);
+    rasterizer->DispatchCompute(code_addr);
 }
 
 Texture::TICEntry KeplerCompute::GetTICEntry(u32 tic_index) const {
@@ -93,14 +111,6 @@ Texture::TICEntry KeplerCompute::GetTICEntry(u32 tic_index) const {
 
     Texture::TICEntry tic_entry;
     memory_manager.ReadBlockUnsafe(tic_address_gpu, &tic_entry, sizeof(Texture::TICEntry));
-
-    const auto r_type{tic_entry.r_type.Value()};
-    const auto g_type{tic_entry.g_type.Value()};
-    const auto b_type{tic_entry.b_type.Value()};
-    const auto a_type{tic_entry.a_type.Value()};
-
-    // TODO(Subv): Different data types for separate components are not supported
-    DEBUG_ASSERT(r_type == g_type && r_type == b_type && r_type == a_type);
 
     return tic_entry;
 }

@@ -10,6 +10,10 @@
 #include "common/common_types.h"
 #include "core/loader/loader.h"
 
+namespace Core {
+class System;
+}
+
 namespace FileSys {
 class NACP;
 }
@@ -28,7 +32,7 @@ public:
 
     /**
      * Returns the type of the file
-     * @param file std::shared_ptr<VfsFile> open file
+     * @param file open file
      * @return FileType found, or FileType::Error if this loader doesn't know it
      */
     static FileType IdentifyType(const FileSys::VirtualFile& file);
@@ -37,7 +41,7 @@ public:
         return IdentifyType(file);
     }
 
-    LoadResult Load(Kernel::Process& process) override;
+    LoadResult Load(Kernel::Process& process, Core::System& system) override;
 
     ResultStatus ReadIcon(std::vector<u8>& buffer) override;
     ResultStatus ReadProgramId(u64& out_program_id) override;
@@ -47,7 +51,7 @@ public:
     bool IsRomFSUpdatable() const override;
 
 private:
-    bool LoadNro(Kernel::Process& process, const FileSys::VfsFile& file, VAddr load_base);
+    bool LoadNro(Kernel::Process& process, const FileSys::VfsFile& file);
 
     std::vector<u8> icon_data;
     std::unique_ptr<FileSys::NACP> nacp;

@@ -10,6 +10,7 @@
 
 #include <QMainWindow>
 #include <QTimer>
+#include <QTranslator>
 
 #include "common/common_types.h"
 #include "core/core.h"
@@ -22,19 +23,28 @@ class Config;
 class EmuThread;
 class GameList;
 class GImageInfo;
-class GraphicsBreakPointsWidget;
 class GRenderWindow;
 class LoadingScreen;
 class MicroProfileDialog;
 class ProfilerWidget;
+class ControllerDialog;
 class QLabel;
+class QPushButton;
+class QProgressDialog;
 class WaitTreeWidget;
 enum class GameListOpenTarget;
+enum class GameListRemoveTarget;
+enum class InstalledEntryType;
 class GameListPlaceholder;
 
 namespace Core::Frontend {
+struct ControllerParameters;
 struct SoftwareKeyboardParameters;
 } // namespace Core::Frontend
+
+namespace DiscordRPC {
+class DiscordInterface;
+}
 
 namespace FileSys {
 class ContentProvider;
@@ -42,8 +52,12 @@ class ManualContentProvider;
 class VfsFilesystem;
 } // namespace FileSys
 
-namespace Tegra {
-class DebugContext;
+namespace InputCommon {
+class InputSubsystem;
+}
+
+namespace Service::AM::Applets {
+enum class WebExitReason : u32;
 }
 
 enum class EmulatedDirectoryTarget {
@@ -51,14 +65,16 @@ enum class EmulatedDirectoryTarget {
     SDMC,
 };
 
+enum class InstallResult {
+    Success,
+    Overwrite,
+    Failure,
+};
+
 enum class ReinitializeKeyBehavior {
     NoWarning,
     Warning,
 };
-
-namespace DiscordRPC {
-class DiscordInterface;
-}
 
 class GMainWindow : public QMainWindow {
     Q_OBJECT
@@ -80,7 +96,8 @@ public:
     GMainWindow();
     ~GMainWindow() override;
 
-    std::unique_ptr<DiscordRPC::DiscordInterface> discord_rpc;
+    bool DropAction(QDropEvent* event);
+    void AcceptDropEvent(QDropEvent* event);
 
 signals:
 
@@ -103,22 +120,32 @@ signals:
     // Signal that tells widgets to update icons to use the current theme
     void UpdateThemedIcons();
 
+    void UpdateInstallProgress();
+
+    void ControllerSelectorReconfigureFinished();
+
     void ErrorDisplayFinished();
 
     void ProfileSelectorFinishedSelection(std::optional<Common::UUID> uuid);
+
     void SoftwareKeyboardFinishedText(std::optional<std::u16string> text);
     void SoftwareKeyboardFinishedCheckDialog();
 
-    void WebBrowserUnpackRomFS();
-    void WebBrowserFinishedBrowsing();
+    void WebBrowserExtractOfflineRomFS();
+    void WebBrowserClosed(Service::AM::Applets::WebExitReason exit_reason, std::string last_url);
 
 public slots:
     void OnLoadComplete();
+    void OnExecuteProgram(std::size_t program_index);
+    void ControllerSelectorReconfigureControllers(
+        const Core::Frontend::ControllerParameters& parameters);
     void ErrorDisplayDisplayError(QString body);
     void ProfileSelectorSelectProfile();
     void SoftwareKeyboardGetText(const Core::Frontend::SoftwareKeyboardParameters& parameters);
     void SoftwareKeyboardInvokeCheckDialog(std::u16string error_message);
-    void WebBrowserOpenPage(std::string_view filename, std::string_view arguments);
+    void WebBrowserOpenWebPage(std::string_view main_url, std::string_view additional_args,
+                               bool is_local);
+    void OnAppFocusStateChanged(Qt::ApplicationState state);
 
 private:
     void InitializeWidgets();
@@ -134,13 +161,13 @@ private:
     void PreventOSSleep();
     void AllowOSSleep();
 
-    QStringList GetUnsupportedGLExtensions();
-    bool LoadROM(const QString& filename);
-    void BootGame(const QString& filename);
+    bool LoadROM(const QString& filename, std::size_t program_index);
+    void BootGame(const QString& filename, std::size_t program_index = 0);
     void ShutdownGame();
 
     void ShowTelemetryCallout();
     void SetDiscordEnabled(bool state);
+    void LoadAmiibo(const QString& filename);
 
     void SelectAndSetCurrentUser();
 
@@ -172,6 +199,8 @@ private:
      */
     bool ConfirmClose();
     bool ConfirmChangeGame();
+    bool ConfirmForceLockedExit();
+    void RequestGameExit();
     void closeEvent(QCloseEvent* event) override;
 
 private slots:
@@ -179,10 +208,16 @@ private slots:
     void OnPauseGame();
     void OnStopGame();
     void OnMenuReportCompatibility();
+    void OnOpenModsPage();
+    void OnOpenQuickstartGuide();
+    void OnOpenFAQ();
     /// Called whenever a user selects a game in the game list widget.
     void OnGameListLoadFile(QString game_path);
-    void OnGameListOpenFolder(u64 program_id, GameListOpenTarget target);
+    void OnGameListOpenFolder(u64 program_id, GameListOpenTarget target,
+                              const std::string& game_path);
     void OnTransferableShaderCacheOpenFile(u64 program_id);
+    void OnGameListRemoveInstalledEntry(u64 program_id, InstalledEntryType type);
+    void OnGameListRemoveFile(u64 program_id, GameListRemoveTarget target);
     void OnGameListDumpRomFS(u64 program_id, const std::string& game_path);
     void OnGameListCopyTID(u64 program_id);
     void OnGameListNavigateToGamedbEntry(u64 program_id,
@@ -193,11 +228,11 @@ private slots:
     void OnGameListOpenPerGameProperties(const std::string& file);
     void OnMenuLoadFile();
     void OnMenuLoadFolder();
+    void IncrementInstallProgress();
     void OnMenuInstallToNAND();
-    /// Called whenever a user select the "File->Select -- Directory" where -- is NAND or SD Card
-    void OnMenuSelectEmulatedDirectory(EmulatedDirectoryTarget target);
     void OnMenuRecentFile();
     void OnConfigure();
+    void OnConfigurePerGame();
     void OnLoadAmiibo();
     void OnOpenYuzuFolder();
     void OnAbout();
@@ -208,18 +243,39 @@ private slots:
     void ShowFullscreen();
     void HideFullscreen();
     void ToggleWindowMode();
+    void ResetWindowSize720();
+    void ResetWindowSize1080();
     void OnCaptureScreenshot();
     void OnCoreError(Core::System::ResultStatus, std::string);
     void OnReinitializeKeys(ReinitializeKeyBehavior behavior);
+    void OnLanguageChanged(const QString& locale);
+    void OnMouseActivity();
 
 private:
+    void RemoveBaseContent(u64 program_id, const QString& entry_type);
+    void RemoveUpdateContent(u64 program_id, const QString& entry_type);
+    void RemoveAddOnContent(u64 program_id, const QString& entry_type);
+    void RemoveTransferableShaderCache(u64 program_id);
+    void RemoveCustomConfiguration(u64 program_id);
     std::optional<u64> SelectRomFSDumpTarget(const FileSys::ContentProvider&, u64 program_id);
-    void UpdateWindowTitle(const QString& title_name = {});
+    InstallResult InstallNSPXCI(const QString& filename);
+    InstallResult InstallNCA(const QString& filename);
+    void MigrateConfigFiles();
+    void UpdateWindowTitle(const std::string& title_name = {},
+                           const std::string& title_version = {});
     void UpdateStatusBar();
+    void UpdateStatusButtons();
+    void UpdateUISettings();
+    void HideMouseCursor();
+    void ShowMouseCursor();
+    void OpenURL(const QUrl& url);
+    void LoadTranslation();
+    void OpenPerGameConfiguration(u64 title_id, const std::string& file_name);
 
     Ui::MainWindow ui;
 
-    std::shared_ptr<Tegra::DebugContext> debug_context;
+    std::unique_ptr<DiscordRPC::DiscordInterface> discord_rpc;
+    std::shared_ptr<InputCommon::InputSubsystem> input_subsystem;
 
     GRenderWindow* render_window;
     GameList* game_list;
@@ -229,9 +285,14 @@ private:
 
     // Status bar elements
     QLabel* message_label = nullptr;
+    QLabel* shader_building_label = nullptr;
     QLabel* emu_speed_label = nullptr;
     QLabel* game_fps_label = nullptr;
     QLabel* emu_frametime_label = nullptr;
+    QPushButton* async_status_button = nullptr;
+    QPushButton* multicore_status_button = nullptr;
+    QPushButton* renderer_status_button = nullptr;
+    QPushButton* dock_status_button = nullptr;
     QTimer status_bar_update_timer;
 
     std::unique_ptr<Config> config;
@@ -242,6 +303,9 @@ private:
     // The path to the game currently running
     QString game_path;
 
+    bool auto_paused = false;
+    QTimer mouse_hide_timer;
+
     // FS
     std::shared_ptr<FileSys::VfsFilesystem> vfs;
     std::unique_ptr<FileSys::ManualContentProvider> provider;
@@ -249,8 +313,8 @@ private:
     // Debugger panes
     ProfilerWidget* profilerWidget;
     MicroProfileDialog* microProfileDialog;
-    GraphicsBreakPointsWidget* graphicsBreakpointsWidget;
     WaitTreeWidget* waitTreeWidget;
+    ControllerDialog* controller_dialog;
 
     QAction* actions_recent_files[max_recent_files_item];
 
@@ -259,12 +323,19 @@ private:
 
     HotkeyRegistry hotkey_registry;
 
+    QTranslator translator;
+
+    // Install progress dialog
+    QProgressDialog* install_progress;
+
+    // Last game booted, used for multi-process apps
+    QString last_filename_booted;
+
+    // Disables the web applet for the rest of the emulated session
+    bool disable_web_applet{};
+
 protected:
     void dropEvent(QDropEvent* event) override;
     void dragEnterEvent(QDragEnterEvent* event) override;
     void dragMoveEvent(QDragMoveEvent* event) override;
-
-    // Overrides used to forward signals to the render window when the focus moves out.
-    void keyPressEvent(QKeyEvent* event) override;
-    void keyReleaseEvent(QKeyEvent* event) override;
 };

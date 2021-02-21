@@ -6,11 +6,15 @@
 
 #include <array>
 #include <cstddef>
+#include <memory>
+
 #include "common/common_types.h"
 #include "core/hle/kernel/object.h"
 #include "core/hle/result.h"
 
 namespace Kernel {
+
+class KernelCore;
 
 enum KernelHandle : Handle {
     InvalidHandle = 0,
@@ -46,7 +50,7 @@ public:
     /// This is the maximum limit of handles allowed per process in Horizon
     static constexpr std::size_t MAX_COUNT = 1024;
 
-    HandleTable();
+    explicit HandleTable(KernelCore& kernel);
     ~HandleTable();
 
     /**
@@ -68,7 +72,7 @@ public:
      * @return The created Handle or one of the following errors:
      *           - `ERR_HANDLE_TABLE_FULL`: the maximum number of handles has been exceeded.
      */
-    ResultVal<Handle> Create(SharedPtr<Object> obj);
+    ResultVal<Handle> Create(std::shared_ptr<Object> obj);
 
     /**
      * Returns a new handle that points to the same object as the passed in handle.
@@ -92,7 +96,7 @@ public:
      * Looks up a handle.
      * @return Pointer to the looked-up object, or `nullptr` if the handle is not valid.
      */
-    SharedPtr<Object> GetGeneric(Handle handle) const;
+    std::shared_ptr<Object> GetGeneric(Handle handle) const;
 
     /**
      * Looks up a handle while verifying its type.
@@ -100,7 +104,7 @@ public:
      *         type differs from the requested one.
      */
     template <class T>
-    SharedPtr<T> Get(Handle handle) const {
+    std::shared_ptr<T> Get(Handle handle) const {
         return DynamicObjectCast<T>(GetGeneric(handle));
     }
 
@@ -109,7 +113,7 @@ public:
 
 private:
     /// Stores the Object referenced by the handle or null if the slot is empty.
-    std::array<SharedPtr<Object>, MAX_COUNT> objects;
+    std::array<std::shared_ptr<Object>, MAX_COUNT> objects;
 
     /**
      * The value of `next_generation` when the handle was created, used to check for validity. For
@@ -132,6 +136,9 @@ private:
 
     /// Head of the free slots linked list.
     u16 next_free_slot = 0;
+
+    /// Underlying kernel instance that this handle table operates under.
+    KernelCore& kernel;
 };
 
 } // namespace Kernel

@@ -7,64 +7,13 @@
     <x>0</x>
     <y>0</y>
     <width>400</width>
-    <height>474</height>
+    <height>486</height>
    </rect>
   </property>
   <property name="windowTitle">
    <string>Form</string>
   </property>
   <layout class="QVBoxLayout" name="verticalLayout_1">
-   <item>
-    <layout class="QVBoxLayout" name="verticalLayout_2">
-     <item>
-      <widget class="QGroupBox" name="groupBox">
-       <property name="title">
-        <string>GDB</string>
-       </property>
-       <layout class="QVBoxLayout" name="verticalLayout_3">
-        <item>
-         <layout class="QHBoxLayout" name="horizontalLayout_1">
-          <item>
-           <widget class="QCheckBox" name="toggle_gdbstub">
-            <property name="text">
-             <string>Enable GDB Stub</string>
-            </property>
-           </widget>
-          </item>
-          <item>
-           <spacer name="horizontalSpacer">
-            <property name="orientation">
-             <enum>Qt::Horizontal</enum>
-            </property>
-            <property name="sizeHint" stdset="0">
-             <size>
-              <width>40</width>
-              <height>20</height>
-             </size>
-            </property>
-           </spacer>
-          </item>
-          <item>
-           <widget class="QLabel" name="label_1">
-            <property name="text">
-             <string>Port:</string>
-            </property>
-           </widget>
-          </item>
-          <item>
-           <widget class="QSpinBox" name="gdbport_spinbox">
-            <property name="maximum">
-             <number>65536</number>
-            </property>
-           </widget>
-          </item>
-         </layout>
-        </item>
-       </layout>
-      </widget>
-     </item>
-    </layout>
-   </item>
    <item>
     <widget class="QGroupBox" name="groupBox_2">
      <property name="title">
@@ -90,7 +39,7 @@
         <item>
          <widget class="QCheckBox" name="toggle_console">
           <property name="text">
-           <string>Show Log Console (Windows Only)</string>
+           <string>Show Log in Console</string>
           </property>
          </widget>
         </item>
@@ -103,62 +52,16 @@
         </item>
        </layout>
       </item>
-     </layout>
-    </widget>
-   </item>
-   <item>
-    <widget class="QGroupBox" name="groupBox_3">
-     <property name="title">
-      <string>Homebrew</string>
-     </property>
-     <layout class="QVBoxLayout" name="verticalLayout_5">
       <item>
-       <layout class="QHBoxLayout" name="horizontalLayout_4">
-        <item>
-         <widget class="QLabel" name="label_3">
-          <property name="text">
-           <string>Arguments String</string>
-          </property>
-         </widget>
-        </item>
-        <item>
-         <widget class="QLineEdit" name="homebrew_args_edit"/>
-        </item>
-       </layout>
-      </item>
-     </layout>
-    </widget>
-   </item>
-   <item>
-    <widget class="QGroupBox" name="groupBox_4">
-     <property name="title">
-      <string>Dump</string>
-     </property>
-     <layout class="QVBoxLayout" name="verticalLayout_6">
-      <item>
-       <widget class="QCheckBox" name="dump_decompressed_nso">
-        <property name="whatsThis">
-         <string>When checked, any NSO yuzu tries to load or patch will be copied decompressed to the yuzu/dump directory.</string>
+       <widget class="QCheckBox" name="extended_logging">
+        <property name="enabled">
+         <bool>true</bool>
+        </property>
+        <property name="toolTip">
+         <string>When checked, the max size of the log increases from 100 MB to 1 GB</string>
         </property>
         <property name="text">
-         <string>Dump Decompressed NSOs</string>
-        </property>
-       </widget>
-      </item>
-      <item>
-       <widget class="QCheckBox" name="dump_exefs">
-        <property name="whatsThis">
-         <string>When checked, any game that yuzu loads will have its ExeFS dumped to the yuzu/dump directory.</string>
-        </property>
-        <property name="text">
-         <string>Dump ExeFS</string>
-        </property>
-       </widget>
-      </item>
-      <item>
-       <widget class="QCheckBox" name="reporting_services">
-        <property name="text">
-         <string>Enable Verbose Reporting Services</string>
+         <string>Enable Extended Logging</string>
         </property>
        </widget>
       </item>
@@ -181,11 +84,100 @@
     </widget>
    </item>
    <item>
+    <widget class="QGroupBox" name="groupBox_3">
+     <property name="title">
+      <string>Homebrew</string>
+     </property>
+     <layout class="QVBoxLayout" name="verticalLayout_5">
+      <item>
+       <layout class="QHBoxLayout" name="horizontalLayout_4">
+        <item>
+         <widget class="QLabel" name="label_4">
+          <property name="text">
+           <string>Arguments String</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QLineEdit" name="homebrew_args_edit"/>
+        </item>
+       </layout>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
+    <widget class="QGroupBox" name="groupBox_4">
+     <property name="title">
+      <string>Graphics</string>
+     </property>
+     <layout class="QVBoxLayout" name="verticalLayout_6">
+      <item>
+       <widget class="QCheckBox" name="enable_graphics_debugging">
+        <property name="enabled">
+         <bool>true</bool>
+        </property>
+        <property name="toolTip">
+         <string>When checked, the graphics API enters a slower debugging mode</string>
+        </property>
+        <property name="text">
+         <string>Enable Graphics Debugging</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QCheckBox" name="disable_macro_jit">
+        <property name="enabled">
+         <bool>true</bool>
+        </property>
+        <property name="toolTip">
+         <string>When checked, it disables the macro Just In Time compiler. Enabling this makes games run slower</string>
+        </property>
+        <property name="text">
+         <string>Disable Macro JIT</string>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
     <widget class="QGroupBox" name="groupBox_5">
+     <property name="title">
+      <string>Dump</string>
+     </property>
+     <layout class="QVBoxLayout" name="verticalLayout_7">
+      <item>
+       <widget class="QCheckBox" name="reporting_services">
+        <property name="text">
+         <string>Enable Verbose Reporting Services</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QLabel" name="label_5">
+        <property name="font">
+         <font>
+          <italic>true</italic>
+         </font>
+        </property>
+        <property name="text">
+         <string>This will be reset automatically when yuzu closes.</string>
+        </property>
+        <property name="indent">
+         <number>20</number>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
+    <widget class="QGroupBox" name="groupBox_6">
      <property name="title">
       <string>Advanced</string>
      </property>
-     <layout class="QVBoxLayout" name="verticalLayout">
+     <layout class="QVBoxLayout" name="verticalLayout_8">
       <item>
        <widget class="QCheckBox" name="quest_flag">
         <property name="text">
@@ -201,6 +193,9 @@
      <property name="orientation">
       <enum>Qt::Vertical</enum>
      </property>
+     <property name="sizeType">
+      <enum>QSizePolicy::Expanding</enum>
+     </property>
      <property name="sizeHint" stdset="0">
       <size>
        <width>20</width>
@@ -211,23 +206,15 @@
    </item>
   </layout>
  </widget>
+ <tabstops>
+  <tabstop>log_filter_edit</tabstop>
+  <tabstop>toggle_console</tabstop>
+  <tabstop>open_log_button</tabstop>
+  <tabstop>homebrew_args_edit</tabstop>
+  <tabstop>enable_graphics_debugging</tabstop>
+  <tabstop>reporting_services</tabstop>
+  <tabstop>quest_flag</tabstop>
+ </tabstops>
  <resources/>
- <connections>
-  <connection>
-   <sender>toggle_gdbstub</sender>
-   <signal>toggled(bool)</signal>
-   <receiver>gdbport_spinbox</receiver>
-   <slot>setEnabled(bool)</slot>
-   <hints>
-    <hint type="sourcelabel">
-     <x>84</x>
-     <y>157</y>
-    </hint>
-    <hint type="destinationlabel">
-     <x>342</x>
-     <y>158</y>
-    </hint>
-   </hints>
-  </connection>
- </connections>
+ <connections/>
 </ui>

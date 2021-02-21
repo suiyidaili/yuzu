@@ -3,6 +3,7 @@
 // Refer to the license.txt file included.
 
 #include <algorithm>
+#include <random>
 #include <regex>
 #include <mbedtls/sha256.h>
 #include "common/assert.h"
@@ -48,18 +49,21 @@ static bool FollowsTwoDigitDirFormat(std::string_view name) {
 static bool FollowsNcaIdFormat(std::string_view name) {
     static const std::regex nca_id_regex("[0-9A-F]{32}\\.nca", std::regex_constants::ECMAScript |
                                                                    std::regex_constants::icase);
-    return name.size() == 36 && std::regex_match(name.begin(), name.end(), nca_id_regex);
+    static const std::regex nca_id_cnmt_regex(
+        "[0-9A-F]{32}\\.cnmt.nca", std::regex_constants::ECMAScript | std::regex_constants::icase);
+    return (name.size() == 36 && std::regex_match(name.begin(), name.end(), nca_id_regex)) ||
+           (name.size() == 41 && std::regex_match(name.begin(), name.end(), nca_id_cnmt_regex));
 }
 
 static std::string GetRelativePathFromNcaID(const std::array<u8, 16>& nca_id, bool second_hex_upper,
-                                            bool within_two_digit) {
-    if (!within_two_digit) {
-        return fmt::format("/{}.nca", Common::HexToString(nca_id, second_hex_upper));
-    }
+                                            bool within_two_digit, bool cnmt_suffix) {
+    if (!within_two_digit)
+        return fmt::format(cnmt_suffix ? "{}.cnmt.nca" : "/{}.nca",
+                           Common::HexToString(nca_id, second_hex_upper));
 
     Core::Crypto::SHA256Hash hash{};
-    mbedtls_sha256(nca_id.data(), nca_id.size(), hash.data(), 0);
-    return fmt::format("/000000{:02X}/{}.nca", hash[0],
+    mbedtls_sha256_ret(nca_id.data(), nca_id.size(), hash.data(), 0);
+    return fmt::format(cnmt_suffix ? "/000000{:02X}/{}.cnmt.nca" : "/000000{:02X}/{}.nca", hash[0],
                        Common::HexToString(nca_id, second_hex_upper));
 }
 
@@ -101,7 +105,8 @@ ContentRecordType GetCRTypeFromNCAType(NCAContentType type) {
         // TODO(DarkLordZach): Peek at NCA contents to differentiate Manual and Legal.
         return ContentRecordType::HtmlDocument;
     default:
-        UNREACHABLE_MSG("Invalid NCAContentType={:02X}", static_cast<u8>(type));
+        UNREACHABLE_MSG("Invalid NCAContentType={:02X}", type);
+        return ContentRecordType{};
     }
 }
 
@@ -125,6 +130,155 @@ std::unique_ptr<NCA> ContentProvider::GetEntry(ContentProviderEntry entry) const
 
 std::vector<ContentProviderEntry> ContentProvider::ListEntries() const {
     return ListEntriesFilter(std::nullopt, std::nullopt, std::nullopt);
+}
+
+PlaceholderCache::PlaceholderCache(VirtualDir dir_) : dir(std::move(dir_)) {}
+
+bool PlaceholderCache::Create(const NcaID& id, u64 size) const {
+    const auto path = GetRelativePathFromNcaID(id, false, true, false);
+
+    if (dir->GetFileRelative(path) != nullptr) {
+        return false;
+    }
+
+    Core::Crypto::SHA256Hash hash{};
+    mbedtls_sha256_ret(id.data(), id.size(), hash.data(), 0);
+    const auto dirname = fmt::format("000000{:02X}", hash[0]);
+
+    const auto dir2 = GetOrCreateDirectoryRelative(dir, dirname);
+
+    if (dir2 == nullptr)
+        return false;
+
+    const auto file = dir2->CreateFile(fmt::format("{}.nca", Common::HexToString(id, false)));
+
+    if (file == nullptr)
+        return false;
+
+    return file->Resize(size);
+}
+
+bool PlaceholderCache::Delete(const NcaID& id) const {
+    const auto path = GetRelativePathFromNcaID(id, false, true, false);
+
+    if (dir->GetFileRelative(path) == nullptr) {
+        return false;
+    }
+
+    Core::Crypto::SHA256Hash hash{};
+    mbedtls_sha256_ret(id.data(), id.size(), hash.data(), 0);
+    const auto dirname = fmt::format("000000{:02X}", hash[0]);
+
+    const auto dir2 = GetOrCreateDirectoryRelative(dir, dirname);
+
+    const auto res = dir2->DeleteFile(fmt::format("{}.nca", Common::HexToString(id, false)));
+
+    return res;
+}
+
+bool PlaceholderCache::Exists(const NcaID& id) const {
+    const auto path = GetRelativePathFromNcaID(id, false, true, false);
+
+    return dir->GetFileRelative(path) != nullptr;
+}
+
+bool PlaceholderCache::Write(const NcaID& id, u64 offset, const std::vector<u8>& data) const {
+    const auto path = GetRelativePathFromNcaID(id, false, true, false);
+    const auto file = dir->GetFileRelative(path);
+
+    if (file == nullptr)
+        return false;
+
+    return file->WriteBytes(data, offset) == data.size();
+}
+
+bool PlaceholderCache::Register(RegisteredCache* cache, const NcaID& placeholder,
+                                const NcaID& install) const {
+    const auto path = GetRelativePathFromNcaID(placeholder, false, true, false);
+    const auto file = dir->GetFileRelative(path);
+
+    if (file == nullptr)
+        return false;
+
+    const auto res = cache->RawInstallNCA(NCA{file}, &VfsRawCopy, false, install);
+
+    if (res != InstallResult::Success)
+        return false;
+
+    return Delete(placeholder);
+}
+
+bool PlaceholderCache::CleanAll() const {
+    return dir->GetParentDirectory()->CleanSubdirectoryRecursive(dir->GetName());
+}
+
+std::optional<std::array<u8, 0x10>> PlaceholderCache::GetRightsID(const NcaID& id) const {
+    const auto path = GetRelativePathFromNcaID(id, false, true, false);
+    const auto file = dir->GetFileRelative(path);
+
+    if (file == nullptr)
+        return std::nullopt;
+
+    NCA nca{file};
+
+    if (nca.GetStatus() != Loader::ResultStatus::Success &&
+        nca.GetStatus() != Loader::ResultStatus::ErrorMissingBKTRBaseRomFS) {
+        return std::nullopt;
+    }
+
+    const auto rights_id = nca.GetRightsId();
+    if (rights_id == NcaID{})
+        return std::nullopt;
+
+    return rights_id;
+}
+
+u64 PlaceholderCache::Size(const NcaID& id) const {
+    const auto path = GetRelativePathFromNcaID(id, false, true, false);
+    const auto file = dir->GetFileRelative(path);
+
+    if (file == nullptr)
+        return 0;
+
+    return file->GetSize();
+}
+
+bool PlaceholderCache::SetSize(const NcaID& id, u64 new_size) const {
+    const auto path = GetRelativePathFromNcaID(id, false, true, false);
+    const auto file = dir->GetFileRelative(path);
+
+    if (file == nullptr)
+        return false;
+
+    return file->Resize(new_size);
+}
+
+std::vector<NcaID> PlaceholderCache::List() const {
+    std::vector<NcaID> out;
+    for (const auto& sdir : dir->GetSubdirectories()) {
+        for (const auto& file : sdir->GetFiles()) {
+            const auto name = file->GetName();
+            if (name.length() == 36 && name.ends_with(".nca")) {
+                out.push_back(Common::HexStringToArray<0x10>(name.substr(0, 32)));
+            }
+        }
+    }
+    return out;
+}
+
+NcaID PlaceholderCache::Generate() {
+    std::random_device device;
+    std::mt19937 gen(device());
+    std::uniform_int_distribution<u64> distribution(1, std::numeric_limits<u64>::max());
+
+    NcaID out{};
+
+    const auto v1 = distribution(gen);
+    const auto v2 = distribution(gen);
+    std::memcpy(out.data(), &v1, sizeof(u64));
+    std::memcpy(out.data() + sizeof(u64), &v2, sizeof(u64));
+
+    return out;
 }
 
 VirtualFile RegisteredCache::OpenFileOrDirectoryConcat(const VirtualDir& dir,
@@ -169,14 +323,18 @@ VirtualFile RegisteredCache::OpenFileOrDirectoryConcat(const VirtualDir& dir,
 
 VirtualFile RegisteredCache::GetFileAtID(NcaID id) const {
     VirtualFile file;
-    // Try all four modes of file storage:
-    // (bit 1 = uppercase/lower, bit 0 = within a two-digit dir)
-    // 00: /000000**/{:032X}.nca
-    // 01: /{:032X}.nca
-    // 10: /000000**/{:032x}.nca
-    // 11: /{:032x}.nca
-    for (u8 i = 0; i < 4; ++i) {
-        const auto path = GetRelativePathFromNcaID(id, (i & 0b10) == 0, (i & 0b01) == 0);
+    // Try all five relevant modes of file storage:
+    // (bit 2 = uppercase/lower, bit 1 = within a two-digit dir, bit 0 = .cnmt suffix)
+    // 000: /000000**/{:032X}.nca
+    // 010: /{:032X}.nca
+    // 100: /000000**/{:032x}.nca
+    // 110: /{:032x}.nca
+    // 111: /{:032x}.cnmt.nca
+    for (u8 i = 0; i < 8; ++i) {
+        if ((i % 2) == 1 && i != 7)
+            continue;
+        const auto path =
+            GetRelativePathFromNcaID(id, (i & 0b100) == 0, (i & 0b010) == 0, (i & 0b001) == 0b001);
         file = OpenFileOrDirectoryConcat(dir, path);
         if (file != nullptr)
             return file;
@@ -186,15 +344,18 @@ VirtualFile RegisteredCache::GetFileAtID(NcaID id) const {
 
 static std::optional<NcaID> CheckMapForContentRecord(const std::map<u64, CNMT>& map, u64 title_id,
                                                      ContentRecordType type) {
-    if (map.find(title_id) == map.end())
-        return {};
+    const auto cmnt_iter = map.find(title_id);
+    if (cmnt_iter == map.cend()) {
+        return std::nullopt;
+    }
 
-    const auto& cnmt = map.at(title_id);
-
-    const auto iter = std::find_if(cnmt.GetContentRecords().begin(), cnmt.GetContentRecords().end(),
+    const auto& cnmt = cmnt_iter->second;
+    const auto& content_records = cnmt.GetContentRecords();
+    const auto iter = std::find_if(content_records.cbegin(), content_records.cend(),
                                    [type](const ContentRecord& rec) { return rec.type == type; });
-    if (iter == cnmt.GetContentRecords().end())
-        return {};
+    if (iter == content_records.cend()) {
+        return std::nullopt;
+    }
 
     return std::make_optional(iter->nca_id);
 }
@@ -250,7 +411,7 @@ void RegisteredCache::ProcessFiles(const std::vector<NcaID>& ids) {
 
         if (file == nullptr)
             continue;
-        const auto nca = std::make_shared<NCA>(parser(file, id), nullptr, 0, keys);
+        const auto nca = std::make_shared<NCA>(parser(file, id), nullptr, 0);
         if (nca->GetStatus() != Loader::ResultStatus::Success ||
             nca->GetType() != NCAContentType::Meta) {
             continue;
@@ -309,14 +470,16 @@ VirtualFile RegisteredCache::GetEntryUnparsed(u64 title_id, ContentRecordType ty
 
 std::optional<u32> RegisteredCache::GetEntryVersion(u64 title_id) const {
     const auto meta_iter = meta.find(title_id);
-    if (meta_iter != meta.end())
+    if (meta_iter != meta.cend()) {
         return meta_iter->second.GetTitleVersion();
+    }
 
     const auto yuzu_meta_iter = yuzu_meta.find(title_id);
-    if (yuzu_meta_iter != yuzu_meta.end())
+    if (yuzu_meta_iter != yuzu_meta.cend()) {
         return yuzu_meta_iter->second.GetTitleVersion();
+    }
 
-    return {};
+    return std::nullopt;
 }
 
 VirtualFile RegisteredCache::GetEntryRaw(u64 title_id, ContentRecordType type) const {
@@ -328,7 +491,7 @@ std::unique_ptr<NCA> RegisteredCache::GetEntry(u64 title_id, ContentRecordType t
     const auto raw = GetEntryRaw(title_id, type);
     if (raw == nullptr)
         return nullptr;
-    return std::make_unique<NCA>(raw, nullptr, 0, keys);
+    return std::make_unique<NCA>(raw, nullptr, 0);
 }
 
 template <typename T>
@@ -402,55 +565,137 @@ InstallResult RegisteredCache::InstallEntry(const NSP& nsp, bool overwrite_if_ex
         return InstallResult::ErrorMetaFailed;
     }
 
-    // Install Metadata File
     const auto meta_id_raw = (*meta_iter)->GetName().substr(0, 32);
     const auto meta_id = Common::HexStringToArray<16>(meta_id_raw);
 
-    const auto res = RawInstallNCA(**meta_iter, copy, overwrite_if_exists, meta_id);
-    if (res != InstallResult::Success)
-        return res;
+    if ((*meta_iter)->GetSubdirectories().empty()) {
+        LOG_ERROR(Loader,
+                  "The file you are attempting to install does not contain a section0 within the "
+                  "metadata NCA and is therefore malformed. Verify that the file is valid.");
+        return InstallResult::ErrorMetaFailed;
+    }
 
-    // Install all the other NCAs
     const auto section0 = (*meta_iter)->GetSubdirectories()[0];
+
+    if (section0->GetFiles().empty()) {
+        LOG_ERROR(Loader,
+                  "The file you are attempting to install does not contain a CNMT within the "
+                  "metadata NCA and is therefore malformed. Verify that the file is valid.");
+        return InstallResult::ErrorMetaFailed;
+    }
+
     const auto cnmt_file = section0->GetFiles()[0];
     const CNMT cnmt(cnmt_file);
+
+    const auto title_id = cnmt.GetTitleID();
+    const auto result = RemoveExistingEntry(title_id);
+
+    // Install Metadata File
+    const auto res = RawInstallNCA(**meta_iter, copy, overwrite_if_exists, meta_id);
+    if (res != InstallResult::Success) {
+        return res;
+    }
+
+    // Install all the other NCAs
     for (const auto& record : cnmt.GetContentRecords()) {
         // Ignore DeltaFragments, they are not useful to us
-        if (record.type == ContentRecordType::DeltaFragment)
+        if (record.type == ContentRecordType::DeltaFragment) {
             continue;
+        }
         const auto nca = GetNCAFromNSPForID(nsp, record.nca_id);
-        if (nca == nullptr)
+        if (nca == nullptr) {
             return InstallResult::ErrorCopyFailed;
+        }
         const auto res2 = RawInstallNCA(*nca, copy, overwrite_if_exists, record.nca_id);
-        if (res2 != InstallResult::Success)
+        if (res2 != InstallResult::Success) {
             return res2;
+        }
     }
 
     Refresh();
+    if (result) {
+        return InstallResult::OverwriteExisting;
+    }
     return InstallResult::Success;
 }
 
 InstallResult RegisteredCache::InstallEntry(const NCA& nca, TitleType type,
                                             bool overwrite_if_exists, const VfsCopyFunction& copy) {
-    CNMTHeader header{
-        nca.GetTitleId(), ///< Title ID
-        0,                ///< Ignore/Default title version
-        type,             ///< Type
-        {},               ///< Padding
-        0x10,             ///< Default table offset
-        1,                ///< 1 Content Entry
-        0,                ///< No Meta Entries
-        {},               ///< Padding
+    const CNMTHeader header{
+        .title_id = nca.GetTitleId(),
+        .title_version = 0,
+        .type = type,
+        .reserved = {},
+        .table_offset = 0x10,
+        .number_content_entries = 1,
+        .number_meta_entries = 0,
+        .attributes = 0,
+        .reserved2 = {},
+        .is_committed = 0,
+        .required_download_system_version = 0,
+        .reserved3 = {},
     };
-    OptionalHeader opt_header{0, 0};
+    const OptionalHeader opt_header{0, 0};
     ContentRecord c_rec{{}, {}, {}, GetCRTypeFromNCAType(nca.GetType()), {}};
     const auto& data = nca.GetBaseFile()->ReadBytes(0x100000);
-    mbedtls_sha256(data.data(), data.size(), c_rec.hash.data(), 0);
-    memcpy(&c_rec.nca_id, &c_rec.hash, 16);
+    mbedtls_sha256_ret(data.data(), data.size(), c_rec.hash.data(), 0);
+    std::memcpy(&c_rec.nca_id, &c_rec.hash, 16);
     const CNMT new_cnmt(header, opt_header, {c_rec}, {});
-    if (!RawInstallYuzuMeta(new_cnmt))
+    if (!RawInstallYuzuMeta(new_cnmt)) {
         return InstallResult::ErrorMetaFailed;
+    }
     return RawInstallNCA(nca, copy, overwrite_if_exists, c_rec.nca_id);
+}
+
+bool RegisteredCache::RemoveExistingEntry(u64 title_id) const {
+    const auto delete_nca = [this](const NcaID& id) {
+        const auto path = GetRelativePathFromNcaID(id, false, true, false);
+
+        const bool isFile = dir->GetFileRelative(path) != nullptr;
+        const bool isDir = dir->GetDirectoryRelative(path) != nullptr;
+
+        if (isFile) {
+            return dir->DeleteFile(path);
+        } else if (isDir) {
+            return dir->DeleteSubdirectoryRecursive(path);
+        }
+
+        return false;
+    };
+
+    // If an entry exists in the registered cache, remove it
+    if (HasEntry(title_id, ContentRecordType::Meta)) {
+        LOG_INFO(Loader,
+                 "Previously installed entry (v{}) for title_id={:016X} detected! "
+                 "Attempting to remove...",
+                 GetEntryVersion(title_id).value_or(0), title_id);
+
+        // Get all the ncas associated with the current CNMT and delete them
+        const auto meta_old_id =
+            GetNcaIDFromMetadata(title_id, ContentRecordType::Meta).value_or(NcaID{});
+        const auto program_id =
+            GetNcaIDFromMetadata(title_id, ContentRecordType::Program).value_or(NcaID{});
+        const auto data_id =
+            GetNcaIDFromMetadata(title_id, ContentRecordType::Data).value_or(NcaID{});
+        const auto control_id =
+            GetNcaIDFromMetadata(title_id, ContentRecordType::Control).value_or(NcaID{});
+        const auto html_id =
+            GetNcaIDFromMetadata(title_id, ContentRecordType::HtmlDocument).value_or(NcaID{});
+        const auto legal_id =
+            GetNcaIDFromMetadata(title_id, ContentRecordType::LegalInformation).value_or(NcaID{});
+
+        const auto deleted_meta = delete_nca(meta_old_id);
+        const auto deleted_program = delete_nca(program_id);
+        const auto deleted_data = delete_nca(data_id);
+        const auto deleted_control = delete_nca(control_id);
+        const auto deleted_html = delete_nca(html_id);
+        const auto deleted_legal = delete_nca(legal_id);
+
+        return deleted_meta && (deleted_meta || deleted_program || deleted_data ||
+                                deleted_control || deleted_html || deleted_legal);
+    }
+
+    return false;
 }
 
 InstallResult RegisteredCache::RawInstallNCA(const NCA& nca, const VfsCopyFunction& copy,
@@ -468,11 +713,11 @@ InstallResult RegisteredCache::RawInstallNCA(const NCA& nca, const VfsCopyFuncti
         id = *override_id;
     } else {
         const auto& data = in->ReadBytes(0x100000);
-        mbedtls_sha256(data.data(), data.size(), hash.data(), 0);
+        mbedtls_sha256_ret(data.data(), data.size(), hash.data(), 0);
         memcpy(id.data(), hash.data(), 16);
     }
 
-    std::string path = GetRelativePathFromNcaID(id, false, true);
+    std::string path = GetRelativePathFromNcaID(id, false, true, false);
 
     if (GetFileAtID(id) != nullptr && !overwrite_if_exists) {
         LOG_WARNING(Loader, "Attempting to overwrite existing NCA. Skipping...");
@@ -483,12 +728,13 @@ InstallResult RegisteredCache::RawInstallNCA(const NCA& nca, const VfsCopyFuncti
         LOG_WARNING(Loader, "Overwriting existing NCA...");
         VirtualDir c_dir;
         { c_dir = dir->GetFileRelative(path)->GetContainingDirectory(); }
-        c_dir->DeleteFile(FileUtil::GetFilename(path));
+        c_dir->DeleteFile(Common::FS::GetFilename(path));
     }
 
     auto out = dir->CreateFileRelative(path);
-    if (out == nullptr)
+    if (out == nullptr) {
         return InstallResult::ErrorCopyFailed;
+    }
     return copy(in, out, VFS_RC_LARGE_COPY_BLOCK) ? InstallResult::Success
                                                   : InstallResult::ErrorCopyFailed;
 }
@@ -690,7 +936,8 @@ VirtualFile ManualContentProvider::GetEntryUnparsed(u64 title_id, ContentRecordT
 VirtualFile ManualContentProvider::GetEntryRaw(u64 title_id, ContentRecordType type) const {
     const auto iter =
         std::find_if(entries.begin(), entries.end(), [title_id, type](const auto& entry) {
-            const auto [title_type, content_type, e_title_id] = entry.first;
+            const auto content_type = std::get<1>(entry.first);
+            const auto e_title_id = std::get<2>(entry.first);
             return content_type == type && e_title_id == title_id;
         });
     if (iter == entries.end())
@@ -702,7 +949,7 @@ std::unique_ptr<NCA> ManualContentProvider::GetEntry(u64 title_id, ContentRecord
     const auto res = GetEntryRaw(title_id, type);
     if (res == nullptr)
         return nullptr;
-    return std::make_unique<NCA>(res, nullptr, 0, keys);
+    return std::make_unique<NCA>(res, nullptr, 0);
 }
 
 std::vector<ContentProviderEntry> ManualContentProvider::ListEntriesFilter(

@@ -21,19 +21,13 @@ class Filter;
  */
 struct Entry {
     std::chrono::microseconds timestamp;
-    Class log_class;
-    Level log_level;
-    std::string filename;
-    unsigned int line_num;
+    Class log_class{};
+    Level log_level{};
+    const char* filename = nullptr;
+    unsigned int line_num = 0;
     std::string function;
     std::string message;
     bool final_entry = false;
-
-    Entry() = default;
-    Entry(Entry&& o) = default;
-
-    Entry& operator=(Entry&& o) = default;
-    Entry& operator=(const Entry& o) = default;
 };
 
 /**
@@ -100,7 +94,7 @@ public:
     void Write(const Entry& entry) override;
 
 private:
-    FileUtil::IOFile file;
+    Common::FS::IOFile file;
     std::size_t bytes_written;
 };
 

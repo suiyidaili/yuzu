@@ -6,10 +6,10 @@
 #include "common/logging/log.h"
 #include "core/core.h"
 #include "core/hle/ipc_helpers.h"
+#include "core/hle/kernel/k_readable_event.h"
+#include "core/hle/kernel/k_thread.h"
+#include "core/hle/kernel/k_writable_event.h"
 #include "core/hle/kernel/kernel.h"
-#include "core/hle/kernel/readable_event.h"
-#include "core/hle/kernel/thread.h"
-#include "core/hle/kernel/writable_event.h"
 #include "core/hle/service/nvdrv/interface.h"
 #include "core/hle/service/nvdrv/nvdata.h"
 #include "core/hle/service/nvdrv/nvdrv.h"
@@ -23,101 +23,181 @@ void NVDRV::SignalGPUInterruptSyncpt(const u32 syncpoint_id, const u32 value) {
 void NVDRV::Open(Kernel::HLERequestContext& ctx) {
     LOG_DEBUG(Service_NVDRV, "called");
 
-    const auto& buffer = ctx.ReadBuffer();
-    std::string device_name(buffer.begin(), buffer.end());
+    if (!is_initialized) {
+        ServiceError(ctx, NvResult::NotInitialized);
+        LOG_ERROR(Service_NVDRV, "NvServices is not initalized!");
+        return;
+    }
 
-    u32 fd = nvdrv->Open(device_name);
+    const auto& buffer = ctx.ReadBuffer();
+    const std::string device_name(buffer.begin(), buffer.end());
+    DeviceFD fd = nvdrv->Open(device_name);
+
     IPC::ResponseBuilder rb{ctx, 4};
     rb.Push(RESULT_SUCCESS);
-    rb.Push<u32>(fd);
-    rb.Push<u32>(0);
+    rb.Push<DeviceFD>(fd);
+    rb.PushEnum(fd != INVALID_NVDRV_FD ? NvResult::Success : NvResult::FileOperationFailed);
 }
 
-void NVDRV::Ioctl(Kernel::HLERequestContext& ctx) {
-    LOG_DEBUG(Service_NVDRV, "called");
-
-    IPC::RequestParser rp{ctx};
-    u32 fd = rp.Pop<u32>();
-    u32 command = rp.Pop<u32>();
-
-    std::vector<u8> output(ctx.GetWriteBufferSize());
-
-    IoctlCtrl ctrl{};
-
-    u32 result = nvdrv->Ioctl(fd, command, ctx.ReadBuffer(), output, ctrl);
-
-    if (ctrl.must_delay) {
-        ctrl.fresh_call = false;
-        ctx.SleepClientThread(
-            "NVServices::DelayedResponse", ctrl.timeout,
-            [=](Kernel::SharedPtr<Kernel::Thread> thread, Kernel::HLERequestContext& ctx,
-                Kernel::ThreadWakeupReason reason) {
-                IoctlCtrl ctrl2{ctrl};
-                std::vector<u8> output2 = output;
-                u32 result = nvdrv->Ioctl(fd, command, ctx.ReadBuffer(), output2, ctrl2);
-                ctx.WriteBuffer(output2);
-                IPC::ResponseBuilder rb{ctx, 3};
-                rb.Push(RESULT_SUCCESS);
-                rb.Push(result);
-            },
-            nvdrv->GetEventWriteable(ctrl.event_id));
-    } else {
-        ctx.WriteBuffer(output);
-    }
+void NVDRV::ServiceError(Kernel::HLERequestContext& ctx, NvResult result) {
     IPC::ResponseBuilder rb{ctx, 3};
     rb.Push(RESULT_SUCCESS);
-    rb.Push(result);
+    rb.PushEnum(result);
+}
+
+void NVDRV::Ioctl1(Kernel::HLERequestContext& ctx) {
+    IPC::RequestParser rp{ctx};
+    const auto fd = rp.Pop<DeviceFD>();
+    const auto command = rp.PopRaw<Ioctl>();
+    LOG_DEBUG(Service_NVDRV, "called fd={}, ioctl=0x{:08X}", fd, command.raw);
+
+    if (!is_initialized) {
+        ServiceError(ctx, NvResult::NotInitialized);
+        LOG_ERROR(Service_NVDRV, "NvServices is not initalized!");
+        return;
+    }
+
+    // Check device
+    std::vector<u8> output_buffer(ctx.GetWriteBufferSize(0));
+    const auto input_buffer = ctx.ReadBuffer(0);
+
+    const auto nv_result = nvdrv->Ioctl1(fd, command, input_buffer, output_buffer);
+    if (command.is_out != 0) {
+        ctx.WriteBuffer(output_buffer);
+    }
+
+    IPC::ResponseBuilder rb{ctx, 3};
+    rb.Push(RESULT_SUCCESS);
+    rb.PushEnum(nv_result);
+}
+
+void NVDRV::Ioctl2(Kernel::HLERequestContext& ctx) {
+    IPC::RequestParser rp{ctx};
+    const auto fd = rp.Pop<DeviceFD>();
+    const auto command = rp.PopRaw<Ioctl>();
+    LOG_DEBUG(Service_NVDRV, "called fd={}, ioctl=0x{:08X}", fd, command.raw);
+
+    if (!is_initialized) {
+        ServiceError(ctx, NvResult::NotInitialized);
+        LOG_ERROR(Service_NVDRV, "NvServices is not initalized!");
+        return;
+    }
+
+    const auto input_buffer = ctx.ReadBuffer(0);
+    const auto input_inlined_buffer = ctx.ReadBuffer(1);
+    std::vector<u8> output_buffer(ctx.GetWriteBufferSize(0));
+
+    const auto nv_result =
+        nvdrv->Ioctl2(fd, command, input_buffer, input_inlined_buffer, output_buffer);
+    if (command.is_out != 0) {
+        ctx.WriteBuffer(output_buffer);
+    }
+
+    IPC::ResponseBuilder rb{ctx, 3};
+    rb.Push(RESULT_SUCCESS);
+    rb.PushEnum(nv_result);
+}
+
+void NVDRV::Ioctl3(Kernel::HLERequestContext& ctx) {
+    IPC::RequestParser rp{ctx};
+    const auto fd = rp.Pop<DeviceFD>();
+    const auto command = rp.PopRaw<Ioctl>();
+    LOG_DEBUG(Service_NVDRV, "called fd={}, ioctl=0x{:08X}", fd, command.raw);
+
+    if (!is_initialized) {
+        ServiceError(ctx, NvResult::NotInitialized);
+        LOG_ERROR(Service_NVDRV, "NvServices is not initalized!");
+        return;
+    }
+
+    const auto input_buffer = ctx.ReadBuffer(0);
+    std::vector<u8> output_buffer(ctx.GetWriteBufferSize(0));
+    std::vector<u8> output_buffer_inline(ctx.GetWriteBufferSize(1));
+
+    const auto nv_result =
+        nvdrv->Ioctl3(fd, command, input_buffer, output_buffer, output_buffer_inline);
+    if (command.is_out != 0) {
+        ctx.WriteBuffer(output_buffer, 0);
+        ctx.WriteBuffer(output_buffer_inline, 1);
+    }
+
+    IPC::ResponseBuilder rb{ctx, 3};
+    rb.Push(RESULT_SUCCESS);
+    rb.PushEnum(nv_result);
 }
 
 void NVDRV::Close(Kernel::HLERequestContext& ctx) {
     LOG_DEBUG(Service_NVDRV, "called");
 
+    if (!is_initialized) {
+        ServiceError(ctx, NvResult::NotInitialized);
+        LOG_ERROR(Service_NVDRV, "NvServices is not initalized!");
+        return;
+    }
+
     IPC::RequestParser rp{ctx};
-    u32 fd = rp.Pop<u32>();
+    const auto fd = rp.Pop<DeviceFD>();
+    const auto result = nvdrv->Close(fd);
 
-    auto result = nvdrv->Close(fd);
-
-    IPC::ResponseBuilder rb{ctx, 2};
-    rb.Push(result);
+    IPC::ResponseBuilder rb{ctx, 3};
+    rb.Push(RESULT_SUCCESS);
+    rb.PushEnum(result);
 }
 
 void NVDRV::Initialize(Kernel::HLERequestContext& ctx) {
     LOG_WARNING(Service_NVDRV, "(STUBBED) called");
 
+    is_initialized = true;
+
     IPC::ResponseBuilder rb{ctx, 3};
     rb.Push(RESULT_SUCCESS);
-    rb.Push<u32>(0);
+    rb.PushEnum(NvResult::Success);
 }
 
 void NVDRV::QueryEvent(Kernel::HLERequestContext& ctx) {
     IPC::RequestParser rp{ctx};
-    u32 fd = rp.Pop<u32>();
-    // TODO(Blinkhawk): Figure the meaning of the flag at bit 16
-    u32 event_id = rp.Pop<u32>() & 0x000000FF;
+    const auto fd = rp.Pop<DeviceFD>();
+    const auto event_id = rp.Pop<u32>() & 0x00FF;
     LOG_WARNING(Service_NVDRV, "(STUBBED) called, fd={:X}, event_id={:X}", fd, event_id);
 
-    IPC::ResponseBuilder rb{ctx, 3, 1};
-    rb.Push(RESULT_SUCCESS);
+    if (!is_initialized) {
+        ServiceError(ctx, NvResult::NotInitialized);
+        LOG_ERROR(Service_NVDRV, "NvServices is not initalized!");
+        return;
+    }
+
+    const auto nv_result = nvdrv->VerifyFD(fd);
+    if (nv_result != NvResult::Success) {
+        LOG_ERROR(Service_NVDRV, "Invalid FD specified DeviceFD={}!", fd);
+        ServiceError(ctx, nv_result);
+        return;
+    }
+
     if (event_id < MaxNvEvents) {
-        rb.PushCopyObjects(nvdrv->GetEvent(event_id));
-        rb.Push<u32>(NvResult::Success);
+        IPC::ResponseBuilder rb{ctx, 3, 1};
+        rb.Push(RESULT_SUCCESS);
+        auto event = nvdrv->GetEvent(event_id);
+        event->Clear();
+        rb.PushCopyObjects(event);
+        rb.PushEnum(NvResult::Success);
     } else {
-        rb.Push<u32>(0);
-        rb.Push<u32>(NvResult::BadParameter);
+        IPC::ResponseBuilder rb{ctx, 3};
+        rb.Push(RESULT_SUCCESS);
+        rb.PushEnum(NvResult::BadParameter);
     }
 }
 
-void NVDRV::SetClientPID(Kernel::HLERequestContext& ctx) {
+void NVDRV::SetAruid(Kernel::HLERequestContext& ctx) {
     IPC::RequestParser rp{ctx};
     pid = rp.Pop<u64>();
     LOG_WARNING(Service_NVDRV, "(STUBBED) called, pid=0x{:X}", pid);
 
     IPC::ResponseBuilder rb{ctx, 3};
     rb.Push(RESULT_SUCCESS);
-    rb.Push<u32>(0);
+    rb.PushEnum(NvResult::Success);
 }
 
-void NVDRV::FinishInitialize(Kernel::HLERequestContext& ctx) {
+void NVDRV::SetGraphicsFirmwareMemoryMarginEnabled(Kernel::HLERequestContext& ctx) {
     LOG_WARNING(Service_NVDRV, "(STUBBED) called");
 
     IPC::ResponseBuilder rb{ctx, 2};
@@ -127,8 +207,9 @@ void NVDRV::FinishInitialize(Kernel::HLERequestContext& ctx) {
 void NVDRV::GetStatus(Kernel::HLERequestContext& ctx) {
     LOG_WARNING(Service_NVDRV, "(STUBBED) called");
 
-    IPC::ResponseBuilder rb{ctx, 2};
+    IPC::ResponseBuilder rb{ctx, 3};
     rb.Push(RESULT_SUCCESS);
+    rb.PushEnum(NvResult::Success);
 }
 
 void NVDRV::DumpGraphicsMemoryInfo(Kernel::HLERequestContext& ctx) {
@@ -140,23 +221,24 @@ void NVDRV::DumpGraphicsMemoryInfo(Kernel::HLERequestContext& ctx) {
     rb.Push(RESULT_SUCCESS);
 }
 
-NVDRV::NVDRV(std::shared_ptr<Module> nvdrv, const char* name)
-    : ServiceFramework(name), nvdrv(std::move(nvdrv)) {
+NVDRV::NVDRV(Core::System& system_, std::shared_ptr<Module> nvdrv_, const char* name)
+    : ServiceFramework{system_, name}, nvdrv{std::move(nvdrv_)} {
     static const FunctionInfo functions[] = {
         {0, &NVDRV::Open, "Open"},
-        {1, &NVDRV::Ioctl, "Ioctl"},
+        {1, &NVDRV::Ioctl1, "Ioctl"},
         {2, &NVDRV::Close, "Close"},
         {3, &NVDRV::Initialize, "Initialize"},
         {4, &NVDRV::QueryEvent, "QueryEvent"},
         {5, nullptr, "MapSharedMem"},
         {6, &NVDRV::GetStatus, "GetStatus"},
-        {7, nullptr, "ForceSetClientPID"},
-        {8, &NVDRV::SetClientPID, "SetClientPID"},
+        {7, nullptr, "SetAruidForTest"},
+        {8, &NVDRV::SetAruid, "SetAruid"},
         {9, &NVDRV::DumpGraphicsMemoryInfo, "DumpGraphicsMemoryInfo"},
         {10, nullptr, "InitializeDevtools"},
-        {11, &NVDRV::Ioctl, "Ioctl2"},
-        {12, nullptr, "Ioctl3"},
-        {13, &NVDRV::FinishInitialize, "FinishInitialize"},
+        {11, &NVDRV::Ioctl2, "Ioctl2"},
+        {12, &NVDRV::Ioctl3, "Ioctl3"},
+        {13, &NVDRV::SetGraphicsFirmwareMemoryMarginEnabled,
+         "SetGraphicsFirmwareMemoryMarginEnabled"},
     };
     RegisterHandlers(functions);
 }

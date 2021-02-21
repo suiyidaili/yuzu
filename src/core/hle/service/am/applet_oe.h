@@ -9,16 +9,22 @@
 #include "core/hle/service/service.h"
 
 namespace Service {
+namespace FileSystem {
+class FileSystemController;
+}
+
 namespace NVFlinger {
 class NVFlinger;
 }
 
 namespace AM {
 
+class AppletMessageQueue;
+
 class AppletOE final : public ServiceFramework<AppletOE> {
 public:
-    explicit AppletOE(std::shared_ptr<NVFlinger::NVFlinger> nvflinger,
-                      std::shared_ptr<AppletMessageQueue> msg_queue, Core::System& system);
+    explicit AppletOE(NVFlinger::NVFlinger& nvflinger_,
+                      std::shared_ptr<AppletMessageQueue> msg_queue_, Core::System& system_);
     ~AppletOE() override;
 
     const std::shared_ptr<AppletMessageQueue>& GetMessageQueue() const;
@@ -26,9 +32,8 @@ public:
 private:
     void OpenApplicationProxy(Kernel::HLERequestContext& ctx);
 
-    std::shared_ptr<NVFlinger::NVFlinger> nvflinger;
+    NVFlinger::NVFlinger& nvflinger;
     std::shared_ptr<AppletMessageQueue> msg_queue;
-    Core::System& system;
 };
 
 } // namespace AM

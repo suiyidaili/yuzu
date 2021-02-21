@@ -6,13 +6,6 @@
 #include <cstring>
 #include <vector>
 
-#include <FontChineseSimplified.h>
-#include <FontChineseTraditional.h>
-#include <FontExtendedChineseSimplified.h>
-#include <FontKorean.h>
-#include <FontNintendoExtended.h>
-#include <FontStandard.h>
-
 #include "common/assert.h"
 #include "common/common_paths.h"
 #include "common/common_types.h"
@@ -24,49 +17,24 @@
 #include "core/file_sys/nca_metadata.h"
 #include "core/file_sys/registered_cache.h"
 #include "core/file_sys/romfs.h"
+#include "core/file_sys/system_archive/system_archive.h"
 #include "core/hle/ipc_helpers.h"
+#include "core/hle/kernel/kernel.h"
+#include "core/hle/kernel/physical_memory.h"
 #include "core/hle/kernel/shared_memory.h"
 #include "core/hle/service/filesystem/filesystem.h"
 #include "core/hle/service/ns/pl_u.h"
 
 namespace Service::NS {
 
-enum class FontArchives : u64 {
-    Extension = 0x0100000000000810,
-    Standard = 0x0100000000000811,
-    Korean = 0x0100000000000812,
-    ChineseTraditional = 0x0100000000000813,
-    ChineseSimple = 0x0100000000000814,
-};
-
 struct FontRegion {
     u32 offset;
     u32 size;
 };
 
-constexpr std::array<std::pair<FontArchives, const char*>, 7> SHARED_FONTS{
-    std::make_pair(FontArchives::Standard, "nintendo_udsg-r_std_003.bfttf"),
-    std::make_pair(FontArchives::ChineseSimple, "nintendo_udsg-r_org_zh-cn_003.bfttf"),
-    std::make_pair(FontArchives::ChineseSimple, "nintendo_udsg-r_ext_zh-cn_003.bfttf"),
-    std::make_pair(FontArchives::ChineseTraditional, "nintendo_udjxh-db_zh-tw_003.bfttf"),
-    std::make_pair(FontArchives::Korean, "nintendo_udsg-r_ko_003.bfttf"),
-    std::make_pair(FontArchives::Extension, "nintendo_ext_003.bfttf"),
-    std::make_pair(FontArchives::Extension, "nintendo_ext2_003.bfttf"),
-};
-
-constexpr std::array<const char*, 7> SHARED_FONTS_TTF{
-    "FontStandard.ttf",
-    "FontChineseSimplified.ttf",
-    "FontExtendedChineseSimplified.ttf",
-    "FontChineseTraditional.ttf",
-    "FontKorean.ttf",
-    "FontNintendoExtended.ttf",
-    "FontNintendoExtended2.ttf",
-};
-
 // The below data is specific to shared font data dumped from Switch on f/w 2.2
 // Virtual address and offsets/sizes likely will vary by dump
-constexpr VAddr SHARED_FONT_MEM_VADDR{0x00000009d3016000ULL};
+[[maybe_unused]] constexpr VAddr SHARED_FONT_MEM_VADDR{0x00000009d3016000ULL};
 constexpr u32 EXPECTED_RESULT{0x7f9a0218}; // What we expect the decrypted bfttf first 4 bytes to be
 constexpr u32 EXPECTED_MAGIC{0x36f81a1e};  // What we expect the encrypted bfttf first 4 bytes to be
 constexpr u64 SHARED_FONT_MEM_SIZE{0x1100000};
@@ -94,15 +62,37 @@ static void DecryptSharedFont(const std::vector<u32>& input, Kernel::PhysicalMem
     offset += transformed_font.size() * sizeof(u32);
 }
 
-static void EncryptSharedFont(const std::vector<u8>& input, Kernel::PhysicalMemory& output,
-                              std::size_t& offset) {
-    ASSERT_MSG(offset + input.size() + 8 < SHARED_FONT_MEM_SIZE, "Shared fonts exceeds 17mb!");
-    const u32 KEY = EXPECTED_MAGIC ^ EXPECTED_RESULT;
-    std::memcpy(output.data() + offset, &EXPECTED_RESULT, sizeof(u32)); // Magic header
-    const u32 ENC_SIZE = static_cast<u32>(input.size()) ^ KEY;
-    std::memcpy(output.data() + offset + sizeof(u32), &ENC_SIZE, sizeof(u32));
-    std::memcpy(output.data() + offset + (sizeof(u32) * 2), input.data(), input.size());
-    offset += input.size() + (sizeof(u32) * 2);
+void DecryptSharedFontToTTF(const std::vector<u32>& input, std::vector<u8>& output) {
+    ASSERT_MSG(input[0] == EXPECTED_MAGIC, "Failed to derive key, unexpected magic number");
+
+    if (input.size() < 2) {
+        LOG_ERROR(Service_NS, "Input font is empty");
+        return;
+    }
+
+    const u32 KEY = input[0] ^ EXPECTED_RESULT; // Derive key using an inverse xor
+    std::vector<u32> transformed_font(input.size());
+    // TODO(ogniK): Figure out a better way to do this
+    std::transform(input.begin(), input.end(), transformed_font.begin(),
+                   [&KEY](u32 font_data) { return Common::swap32(font_data ^ KEY); });
+    std::memcpy(output.data(), transformed_font.data() + 2,
+                (transformed_font.size() - 2) * sizeof(u32));
+}
+
+void EncryptSharedFont(const std::vector<u32>& input, std::vector<u8>& output,
+                       std::size_t& offset) {
+    ASSERT_MSG(offset + (input.size() * sizeof(u32)) < SHARED_FONT_MEM_SIZE,
+               "Shared fonts exceeds 17mb!");
+
+    const auto key = Common::swap32(EXPECTED_RESULT ^ EXPECTED_MAGIC);
+    std::vector<u32> transformed_font(input.size() + 2);
+    transformed_font[0] = Common::swap32(EXPECTED_MAGIC);
+    transformed_font[1] = Common::swap32(static_cast<u32>(input.size() * sizeof(u32))) ^ key;
+    std::transform(input.begin(), input.end(), transformed_font.begin() + 2,
+                   [key](u32 in) { return in ^ key; });
+    std::memcpy(output.data() + offset, transformed_font.data(),
+                transformed_font.size() * sizeof(u32));
+    offset += transformed_font.size() * sizeof(u32);
 }
 
 // Helper function to make BuildSharedFontsRawRegions a bit nicer
@@ -141,7 +131,7 @@ struct PL_U::Impl {
     }
 
     /// Handle to shared memory region designated for a shared font
-    Kernel::SharedPtr<Kernel::SharedMemory> shared_font_mem;
+    std::shared_ptr<Kernel::SharedMemory> shared_font_mem;
 
     /// Backing memory for the shared font data
     std::shared_ptr<Kernel::PhysicalMemory> shared_font;
@@ -150,7 +140,9 @@ struct PL_U::Impl {
     std::vector<FontRegion> shared_font_regions;
 };
 
-PL_U::PL_U() : ServiceFramework("pl:u"), impl{std::make_unique<Impl>()} {
+PL_U::PL_U(Core::System& system_)
+    : ServiceFramework{system_, "pl:u"}, impl{std::make_unique<Impl>()} {
+    // clang-format off
     static const FunctionInfo functions[] = {
         {0, &PL_U::RequestLoad, "RequestLoad"},
         {1, &PL_U::GetLoadState, "GetLoadState"},
@@ -158,119 +150,61 @@ PL_U::PL_U() : ServiceFramework("pl:u"), impl{std::make_unique<Impl>()} {
         {3, &PL_U::GetSharedMemoryAddressOffset, "GetSharedMemoryAddressOffset"},
         {4, &PL_U::GetSharedMemoryNativeHandle, "GetSharedMemoryNativeHandle"},
         {5, &PL_U::GetSharedFontInOrderOfPriority, "GetSharedFontInOrderOfPriority"},
+        {6, nullptr, "GetSharedFontInOrderOfPriorityForSystem"},
+        {100, nullptr, "RequestApplicationFunctionAuthorization"},
+        {101, nullptr, "RequestApplicationFunctionAuthorizationByProcessId"},
+        {102, nullptr, "RequestApplicationFunctionAuthorizationByApplicationId"},
+        {1000, nullptr, "LoadNgWordDataForPlatformRegionChina"},
+        {1001, nullptr, "GetNgWordDataSizeForPlatformRegionChina"},
     };
+    // clang-format on
     RegisterHandlers(functions);
+
+    auto& fsc = system.GetFileSystemController();
+
     // Attempt to load shared font data from disk
-    const auto* nand = FileSystem::GetSystemNANDContents();
+    const auto* nand = fsc.GetSystemNANDContents();
     std::size_t offset = 0;
-    // Rebuild shared fonts from data ncas
-    if (nand->HasEntry(static_cast<u64>(FontArchives::Standard),
-                       FileSys::ContentRecordType::Data)) {
-        impl->shared_font = std::make_shared<Kernel::PhysicalMemory>(SHARED_FONT_MEM_SIZE);
-        for (auto font : SHARED_FONTS) {
-            const auto nca =
-                nand->GetEntry(static_cast<u64>(font.first), FileSys::ContentRecordType::Data);
-            if (!nca) {
-                LOG_ERROR(Service_NS, "Failed to find {:016X}! Skipping",
-                          static_cast<u64>(font.first));
-                continue;
-            }
-            const auto romfs = nca->GetRomFS();
-            if (!romfs) {
-                LOG_ERROR(Service_NS, "{:016X} has no RomFS! Skipping",
-                          static_cast<u64>(font.first));
-                continue;
-            }
-            const auto extracted_romfs = FileSys::ExtractRomFS(romfs);
-            if (!extracted_romfs) {
-                LOG_ERROR(Service_NS, "Failed to extract RomFS for {:016X}! Skipping",
-                          static_cast<u64>(font.first));
-                continue;
-            }
-            const auto font_fp = extracted_romfs->GetFile(font.second);
-            if (!font_fp) {
-                LOG_ERROR(Service_NS, "{:016X} has no file \"{}\"! Skipping",
-                          static_cast<u64>(font.first), font.second);
-                continue;
-            }
-            std::vector<u32> font_data_u32(font_fp->GetSize() / sizeof(u32));
-            font_fp->ReadBytes<u32>(font_data_u32.data(), font_fp->GetSize());
-            // We need to be BigEndian as u32s for the xor encryption
-            std::transform(font_data_u32.begin(), font_data_u32.end(), font_data_u32.begin(),
-                           Common::swap32);
-            FontRegion region{
-                static_cast<u32>(offset + 8),
-                static_cast<u32>((font_data_u32.size() * sizeof(u32)) -
-                                 8)}; // Font offset and size do not account for the header
-            DecryptSharedFont(font_data_u32, *impl->shared_font, offset);
-            impl->shared_font_regions.push_back(region);
+    // Rebuild shared fonts from data ncas or synthesize
+
+    impl->shared_font = std::make_shared<Kernel::PhysicalMemory>(SHARED_FONT_MEM_SIZE);
+    for (auto font : SHARED_FONTS) {
+        FileSys::VirtualFile romfs;
+        const auto nca =
+            nand->GetEntry(static_cast<u64>(font.first), FileSys::ContentRecordType::Data);
+        if (nca) {
+            romfs = nca->GetRomFS();
         }
 
-    } else {
-        impl->shared_font = std::make_shared<Kernel::PhysicalMemory>(
-            SHARED_FONT_MEM_SIZE); // Shared memory needs to always be allocated and a fixed size
-
-        const std::string user_path = FileUtil::GetUserPath(FileUtil::UserPath::SysDataDir);
-        const std::string filepath{user_path + SHARED_FONT};
-
-        // Create path if not already created
-        if (!FileUtil::CreateFullPath(filepath)) {
-            LOG_ERROR(Service_NS, "Failed to create sharedfonts path \"{}\"!", filepath);
-            return;
+        if (!romfs) {
+            romfs = FileSys::SystemArchive::SynthesizeSystemArchive(static_cast<u64>(font.first));
         }
 
-        bool using_ttf = false;
-        for (const char* font_ttf : SHARED_FONTS_TTF) {
-            if (FileUtil::Exists(user_path + font_ttf)) {
-                using_ttf = true;
-                FileUtil::IOFile file(user_path + font_ttf, "rb");
-                if (file.IsOpen()) {
-                    std::vector<u8> ttf_bytes(file.GetSize());
-                    file.ReadBytes<u8>(ttf_bytes.data(), ttf_bytes.size());
-                    FontRegion region{
-                        static_cast<u32>(offset + 8),
-                        static_cast<u32>(ttf_bytes.size())}; // Font offset and size do not account
-                                                             // for the header
-                    EncryptSharedFont(ttf_bytes, *impl->shared_font, offset);
-                    impl->shared_font_regions.push_back(region);
-                } else {
-                    LOG_WARNING(Service_NS, "Unable to load font: {}", font_ttf);
-                }
-            } else if (using_ttf) {
-                LOG_WARNING(Service_NS, "Unable to find font: {}", font_ttf);
-            }
+        if (!romfs) {
+            LOG_ERROR(Service_NS, "Failed to find or synthesize {:016X}! Skipping", font.first);
+            continue;
         }
-        if (using_ttf)
-            return;
-        FileUtil::IOFile file(filepath, "rb");
 
-        if (file.IsOpen()) {
-            // Read shared font data
-            ASSERT(file.GetSize() == SHARED_FONT_MEM_SIZE);
-            file.ReadBytes(impl->shared_font->data(), impl->shared_font->size());
-            impl->BuildSharedFontsRawRegions(*impl->shared_font);
-        } else {
-            LOG_WARNING(Service_NS,
-                        "Shared Font file missing. Loading open source replacement from memory");
-
-            // clang-format off
-            const std::vector<std::vector<u8>> open_source_shared_fonts_ttf = {
-                {std::begin(FontChineseSimplified), std::end(FontChineseSimplified)},
-                {std::begin(FontChineseTraditional), std::end(FontChineseTraditional)},
-                {std::begin(FontExtendedChineseSimplified), std::end(FontExtendedChineseSimplified)},
-                {std::begin(FontKorean), std::end(FontKorean)},
-                {std::begin(FontNintendoExtended), std::end(FontNintendoExtended)},
-                {std::begin(FontStandard), std::end(FontStandard)},
-            };
-            // clang-format on
-
-            for (const std::vector<u8>& font_ttf : open_source_shared_fonts_ttf) {
-                const FontRegion region{static_cast<u32>(offset + 8),
-                                        static_cast<u32>(font_ttf.size())};
-                EncryptSharedFont(font_ttf, *impl->shared_font, offset);
-                impl->shared_font_regions.push_back(region);
-            }
+        const auto extracted_romfs = FileSys::ExtractRomFS(romfs);
+        if (!extracted_romfs) {
+            LOG_ERROR(Service_NS, "Failed to extract RomFS for {:016X}! Skipping", font.first);
+            continue;
         }
+        const auto font_fp = extracted_romfs->GetFile(font.second);
+        if (!font_fp) {
+            LOG_ERROR(Service_NS, "{:016X} has no file \"{}\"! Skipping", font.first, font.second);
+            continue;
+        }
+        std::vector<u32> font_data_u32(font_fp->GetSize() / sizeof(u32));
+        font_fp->ReadBytes<u32>(font_data_u32.data(), font_fp->GetSize());
+        // We need to be BigEndian as u32s for the xor encryption
+        std::transform(font_data_u32.begin(), font_data_u32.end(), font_data_u32.begin(),
+                       Common::swap32);
+        // Font offset and size do not account for the header
+        const FontRegion region{static_cast<u32>(offset + 8),
+                                static_cast<u32>((font_data_u32.size() * sizeof(u32)) - 8)};
+        DecryptSharedFont(font_data_u32, *impl->shared_font, offset);
+        impl->shared_font_regions.push_back(region);
     }
 }
 
@@ -319,16 +253,13 @@ void PL_U::GetSharedMemoryAddressOffset(Kernel::HLERequestContext& ctx) {
 void PL_U::GetSharedMemoryNativeHandle(Kernel::HLERequestContext& ctx) {
     // Map backing memory for the font data
     LOG_DEBUG(Service_NS, "called");
-    Core::CurrentProcess()->VMManager().MapMemoryBlock(SHARED_FONT_MEM_VADDR, impl->shared_font, 0,
-                                                       SHARED_FONT_MEM_SIZE,
-                                                       Kernel::MemoryState::Shared);
 
     // Create shared font memory object
-    auto& kernel = Core::System::GetInstance().Kernel();
-    impl->shared_font_mem = Kernel::SharedMemory::Create(
-        kernel, Core::CurrentProcess(), SHARED_FONT_MEM_SIZE, Kernel::MemoryPermission::ReadWrite,
-        Kernel::MemoryPermission::Read, SHARED_FONT_MEM_VADDR, Kernel::MemoryRegion::BASE,
-        "PL_U:shared_font_mem");
+    auto& kernel = system.Kernel();
+    impl->shared_font_mem = SharedFrom(&kernel.GetFontSharedMem());
+
+    std::memcpy(impl->shared_font_mem->GetPointer(), impl->shared_font->data(),
+                impl->shared_font->size());
 
     IPC::ResponseBuilder rb{ctx, 2, 1};
     rb.Push(RESULT_SUCCESS);

@@ -30,7 +30,7 @@ bool VfsFilesystem::IsWritable() const {
 }
 
 VfsEntryType VfsFilesystem::GetEntryType(std::string_view path_) const {
-    const auto path = FileUtil::SanitizePath(path_);
+    const auto path = Common::FS::SanitizePath(path_);
     if (root->GetFileRelative(path) != nullptr)
         return VfsEntryType::File;
     if (root->GetDirectoryRelative(path) != nullptr)
@@ -40,22 +40,22 @@ VfsEntryType VfsFilesystem::GetEntryType(std::string_view path_) const {
 }
 
 VirtualFile VfsFilesystem::OpenFile(std::string_view path_, Mode perms) {
-    const auto path = FileUtil::SanitizePath(path_);
+    const auto path = Common::FS::SanitizePath(path_);
     return root->GetFileRelative(path);
 }
 
 VirtualFile VfsFilesystem::CreateFile(std::string_view path_, Mode perms) {
-    const auto path = FileUtil::SanitizePath(path_);
+    const auto path = Common::FS::SanitizePath(path_);
     return root->CreateFileRelative(path);
 }
 
 VirtualFile VfsFilesystem::CopyFile(std::string_view old_path_, std::string_view new_path_) {
-    const auto old_path = FileUtil::SanitizePath(old_path_);
-    const auto new_path = FileUtil::SanitizePath(new_path_);
+    const auto old_path = Common::FS::SanitizePath(old_path_);
+    const auto new_path = Common::FS::SanitizePath(new_path_);
 
     // VfsDirectory impls are only required to implement copy across the current directory.
-    if (FileUtil::GetParentPath(old_path) == FileUtil::GetParentPath(new_path)) {
-        if (!root->Copy(FileUtil::GetFilename(old_path), FileUtil::GetFilename(new_path)))
+    if (Common::FS::GetParentPath(old_path) == Common::FS::GetParentPath(new_path)) {
+        if (!root->Copy(Common::FS::GetFilename(old_path), Common::FS::GetFilename(new_path)))
             return nullptr;
         return OpenFile(new_path, Mode::ReadWrite);
     }
@@ -76,8 +76,8 @@ VirtualFile VfsFilesystem::CopyFile(std::string_view old_path_, std::string_view
 }
 
 VirtualFile VfsFilesystem::MoveFile(std::string_view old_path, std::string_view new_path) {
-    const auto sanitized_old_path = FileUtil::SanitizePath(old_path);
-    const auto sanitized_new_path = FileUtil::SanitizePath(new_path);
+    const auto sanitized_old_path = Common::FS::SanitizePath(old_path);
+    const auto sanitized_new_path = Common::FS::SanitizePath(new_path);
 
     // Again, non-default impls are highly encouraged to provide a more optimized version of this.
     auto out = CopyFile(sanitized_old_path, sanitized_new_path);
@@ -89,26 +89,26 @@ VirtualFile VfsFilesystem::MoveFile(std::string_view old_path, std::string_view 
 }
 
 bool VfsFilesystem::DeleteFile(std::string_view path_) {
-    const auto path = FileUtil::SanitizePath(path_);
-    auto parent = OpenDirectory(FileUtil::GetParentPath(path), Mode::Write);
+    const auto path = Common::FS::SanitizePath(path_);
+    auto parent = OpenDirectory(Common::FS::GetParentPath(path), Mode::Write);
     if (parent == nullptr)
         return false;
-    return parent->DeleteFile(FileUtil::GetFilename(path));
+    return parent->DeleteFile(Common::FS::GetFilename(path));
 }
 
 VirtualDir VfsFilesystem::OpenDirectory(std::string_view path_, Mode perms) {
-    const auto path = FileUtil::SanitizePath(path_);
+    const auto path = Common::FS::SanitizePath(path_);
     return root->GetDirectoryRelative(path);
 }
 
 VirtualDir VfsFilesystem::CreateDirectory(std::string_view path_, Mode perms) {
-    const auto path = FileUtil::SanitizePath(path_);
+    const auto path = Common::FS::SanitizePath(path_);
     return root->CreateDirectoryRelative(path);
 }
 
 VirtualDir VfsFilesystem::CopyDirectory(std::string_view old_path_, std::string_view new_path_) {
-    const auto old_path = FileUtil::SanitizePath(old_path_);
-    const auto new_path = FileUtil::SanitizePath(new_path_);
+    const auto old_path = Common::FS::SanitizePath(old_path_);
+    const auto new_path = Common::FS::SanitizePath(new_path_);
 
     // Non-default impls are highly encouraged to provide a more optimized version of this.
     auto old_dir = OpenDirectory(old_path, Mode::Read);
@@ -139,8 +139,8 @@ VirtualDir VfsFilesystem::CopyDirectory(std::string_view old_path_, std::string_
 }
 
 VirtualDir VfsFilesystem::MoveDirectory(std::string_view old_path, std::string_view new_path) {
-    const auto sanitized_old_path = FileUtil::SanitizePath(old_path);
-    const auto sanitized_new_path = FileUtil::SanitizePath(new_path);
+    const auto sanitized_old_path = Common::FS::SanitizePath(old_path);
+    const auto sanitized_new_path = Common::FS::SanitizePath(new_path);
 
     // Non-default impls are highly encouraged to provide a more optimized version of this.
     auto out = CopyDirectory(sanitized_old_path, sanitized_new_path);
@@ -152,28 +152,29 @@ VirtualDir VfsFilesystem::MoveDirectory(std::string_view old_path, std::string_v
 }
 
 bool VfsFilesystem::DeleteDirectory(std::string_view path_) {
-    const auto path = FileUtil::SanitizePath(path_);
-    auto parent = OpenDirectory(FileUtil::GetParentPath(path), Mode::Write);
+    const auto path = Common::FS::SanitizePath(path_);
+    auto parent = OpenDirectory(Common::FS::GetParentPath(path), Mode::Write);
     if (parent == nullptr)
         return false;
-    return parent->DeleteSubdirectoryRecursive(FileUtil::GetFilename(path));
+    return parent->DeleteSubdirectoryRecursive(Common::FS::GetFilename(path));
 }
 
 VfsFile::~VfsFile() = default;
 
 std::string VfsFile::GetExtension() const {
-    return std::string(FileUtil::GetExtensionFromFilename(GetName()));
+    return std::string(Common::FS::GetExtensionFromFilename(GetName()));
 }
 
 VfsDirectory::~VfsDirectory() = default;
 
 std::optional<u8> VfsFile::ReadByte(std::size_t offset) const {
     u8 out{};
-    std::size_t size = Read(&out, 1, offset);
-    if (size == 1)
+    const std::size_t size = Read(&out, sizeof(u8), offset);
+    if (size == 1) {
         return out;
+    }
 
-    return {};
+    return std::nullopt;
 }
 
 std::vector<u8> VfsFile::ReadBytes(std::size_t size, std::size_t offset) const {
@@ -202,8 +203,8 @@ std::string VfsFile::GetFullPath() const {
     return GetContainingDirectory()->GetFullPath() + "/" + GetName();
 }
 
-std::shared_ptr<VfsFile> VfsDirectory::GetFileRelative(std::string_view path) const {
-    auto vec = FileUtil::SplitPathComponents(path);
+VirtualFile VfsDirectory::GetFileRelative(std::string_view path) const {
+    auto vec = Common::FS::SplitPathComponents(path);
     vec.erase(std::remove_if(vec.begin(), vec.end(), [](const auto& str) { return str.empty(); }),
               vec.end());
     if (vec.empty()) {
@@ -230,7 +231,7 @@ std::shared_ptr<VfsFile> VfsDirectory::GetFileRelative(std::string_view path) co
     return dir->GetFile(vec.back());
 }
 
-std::shared_ptr<VfsFile> VfsDirectory::GetFileAbsolute(std::string_view path) const {
+VirtualFile VfsDirectory::GetFileAbsolute(std::string_view path) const {
     if (IsRoot()) {
         return GetFileRelative(path);
     }
@@ -238,8 +239,8 @@ std::shared_ptr<VfsFile> VfsDirectory::GetFileAbsolute(std::string_view path) co
     return GetParentDirectory()->GetFileAbsolute(path);
 }
 
-std::shared_ptr<VfsDirectory> VfsDirectory::GetDirectoryRelative(std::string_view path) const {
-    auto vec = FileUtil::SplitPathComponents(path);
+VirtualDir VfsDirectory::GetDirectoryRelative(std::string_view path) const {
+    auto vec = Common::FS::SplitPathComponents(path);
     vec.erase(std::remove_if(vec.begin(), vec.end(), [](const auto& str) { return str.empty(); }),
               vec.end());
     if (vec.empty()) {
@@ -260,7 +261,7 @@ std::shared_ptr<VfsDirectory> VfsDirectory::GetDirectoryRelative(std::string_vie
     return dir;
 }
 
-std::shared_ptr<VfsDirectory> VfsDirectory::GetDirectoryAbsolute(std::string_view path) const {
+VirtualDir VfsDirectory::GetDirectoryAbsolute(std::string_view path) const {
     if (IsRoot()) {
         return GetDirectoryRelative(path);
     }
@@ -268,14 +269,14 @@ std::shared_ptr<VfsDirectory> VfsDirectory::GetDirectoryAbsolute(std::string_vie
     return GetParentDirectory()->GetDirectoryAbsolute(path);
 }
 
-std::shared_ptr<VfsFile> VfsDirectory::GetFile(std::string_view name) const {
+VirtualFile VfsDirectory::GetFile(std::string_view name) const {
     const auto& files = GetFiles();
     const auto iter = std::find_if(files.begin(), files.end(),
                                    [&name](const auto& file1) { return name == file1->GetName(); });
     return iter == files.end() ? nullptr : *iter;
 }
 
-std::shared_ptr<VfsDirectory> VfsDirectory::GetSubdirectory(std::string_view name) const {
+VirtualDir VfsDirectory::GetSubdirectory(std::string_view name) const {
     const auto& subs = GetSubdirectories();
     const auto iter = std::find_if(subs.begin(), subs.end(),
                                    [&name](const auto& file1) { return name == file1->GetName(); });
@@ -300,8 +301,8 @@ std::size_t VfsDirectory::GetSize() const {
     return file_total + subdir_total;
 }
 
-std::shared_ptr<VfsFile> VfsDirectory::CreateFileRelative(std::string_view path) {
-    auto vec = FileUtil::SplitPathComponents(path);
+VirtualFile VfsDirectory::CreateFileRelative(std::string_view path) {
+    auto vec = Common::FS::SplitPathComponents(path);
     vec.erase(std::remove_if(vec.begin(), vec.end(), [](const auto& str) { return str.empty(); }),
               vec.end());
     if (vec.empty()) {
@@ -320,10 +321,10 @@ std::shared_ptr<VfsFile> VfsDirectory::CreateFileRelative(std::string_view path)
         }
     }
 
-    return dir->CreateFileRelative(FileUtil::GetPathWithoutTop(path));
+    return dir->CreateFileRelative(Common::FS::GetPathWithoutTop(path));
 }
 
-std::shared_ptr<VfsFile> VfsDirectory::CreateFileAbsolute(std::string_view path) {
+VirtualFile VfsDirectory::CreateFileAbsolute(std::string_view path) {
     if (IsRoot()) {
         return CreateFileRelative(path);
     }
@@ -331,8 +332,8 @@ std::shared_ptr<VfsFile> VfsDirectory::CreateFileAbsolute(std::string_view path)
     return GetParentDirectory()->CreateFileAbsolute(path);
 }
 
-std::shared_ptr<VfsDirectory> VfsDirectory::CreateDirectoryRelative(std::string_view path) {
-    auto vec = FileUtil::SplitPathComponents(path);
+VirtualDir VfsDirectory::CreateDirectoryRelative(std::string_view path) {
+    auto vec = Common::FS::SplitPathComponents(path);
     vec.erase(std::remove_if(vec.begin(), vec.end(), [](const auto& str) { return str.empty(); }),
               vec.end());
     if (vec.empty()) {
@@ -351,10 +352,10 @@ std::shared_ptr<VfsDirectory> VfsDirectory::CreateDirectoryRelative(std::string_
         }
     }
 
-    return dir->CreateDirectoryRelative(FileUtil::GetPathWithoutTop(path));
+    return dir->CreateDirectoryRelative(Common::FS::GetPathWithoutTop(path));
 }
 
-std::shared_ptr<VfsDirectory> VfsDirectory::CreateDirectoryAbsolute(std::string_view path) {
+VirtualDir VfsDirectory::CreateDirectoryAbsolute(std::string_view path) {
     if (IsRoot()) {
         return CreateDirectoryRelative(path);
     }
@@ -445,27 +446,27 @@ bool ReadOnlyVfsDirectory::IsReadable() const {
     return true;
 }
 
-std::shared_ptr<VfsDirectory> ReadOnlyVfsDirectory::CreateSubdirectory(std::string_view name) {
+VirtualDir ReadOnlyVfsDirectory::CreateSubdirectory(std::string_view name) {
     return nullptr;
 }
 
-std::shared_ptr<VfsFile> ReadOnlyVfsDirectory::CreateFile(std::string_view name) {
+VirtualFile ReadOnlyVfsDirectory::CreateFile(std::string_view name) {
     return nullptr;
 }
 
-std::shared_ptr<VfsFile> ReadOnlyVfsDirectory::CreateFileAbsolute(std::string_view path) {
+VirtualFile ReadOnlyVfsDirectory::CreateFileAbsolute(std::string_view path) {
     return nullptr;
 }
 
-std::shared_ptr<VfsFile> ReadOnlyVfsDirectory::CreateFileRelative(std::string_view path) {
+VirtualFile ReadOnlyVfsDirectory::CreateFileRelative(std::string_view path) {
     return nullptr;
 }
 
-std::shared_ptr<VfsDirectory> ReadOnlyVfsDirectory::CreateDirectoryAbsolute(std::string_view path) {
+VirtualDir ReadOnlyVfsDirectory::CreateDirectoryAbsolute(std::string_view path) {
     return nullptr;
 }
 
-std::shared_ptr<VfsDirectory> ReadOnlyVfsDirectory::CreateDirectoryRelative(std::string_view path) {
+VirtualDir ReadOnlyVfsDirectory::CreateDirectoryRelative(std::string_view path) {
     return nullptr;
 }
 

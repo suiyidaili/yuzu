@@ -9,7 +9,7 @@
 
 namespace FileSys {
 
-OffsetVfsFile::OffsetVfsFile(std::shared_ptr<VfsFile> file_, std::size_t size_, std::size_t offset_,
+OffsetVfsFile::OffsetVfsFile(VirtualFile file_, std::size_t size_, std::size_t offset_,
                              std::string name_, VirtualDir parent_)
     : file(file_), offset(offset_), size(size_), name(std::move(name_)),
       parent(parent_ == nullptr ? file->GetContainingDirectory() : std::move(parent_)) {}
@@ -37,7 +37,7 @@ bool OffsetVfsFile::Resize(std::size_t new_size) {
     return true;
 }
 
-std::shared_ptr<VfsDirectory> OffsetVfsFile::GetContainingDirectory() const {
+VirtualDir OffsetVfsFile::GetContainingDirectory() const {
     return parent;
 }
 
@@ -58,10 +58,11 @@ std::size_t OffsetVfsFile::Write(const u8* data, std::size_t length, std::size_t
 }
 
 std::optional<u8> OffsetVfsFile::ReadByte(std::size_t r_offset) const {
-    if (r_offset < size)
-        return file->ReadByte(offset + r_offset);
+    if (r_offset >= size) {
+        return std::nullopt;
+    }
 
-    return {};
+    return file->ReadByte(offset + r_offset);
 }
 
 std::vector<u8> OffsetVfsFile::ReadBytes(std::size_t r_size, std::size_t r_offset) const {

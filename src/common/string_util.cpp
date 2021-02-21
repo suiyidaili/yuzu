@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <locale>
 #include <sstream>
+
 #include "common/common_paths.h"
 #include "common/logging/log.h"
 #include "common/string_util.h"
@@ -21,14 +22,14 @@ namespace Common {
 /// Make a string lowercase
 std::string ToLower(std::string str) {
     std::transform(str.begin(), str.end(), str.begin(),
-                   [](unsigned char c) { return std::tolower(c); });
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     return str;
 }
 
 /// Make a string uppercase
 std::string ToUpper(std::string str) {
     std::transform(str.begin(), str.end(), str.begin(),
-                   [](unsigned char c) { return std::toupper(c); });
+                   [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
     return str;
 }
 
@@ -140,27 +141,13 @@ std::string ReplaceAll(std::string result, const std::string& src, const std::st
 }
 
 std::string UTF16ToUTF8(const std::u16string& input) {
-#ifdef _MSC_VER
-    // Workaround for missing char16_t/char32_t instantiations in MSVC2017
-    std::wstring_convert<std::codecvt_utf8_utf16<__int16>, __int16> convert;
-    std::basic_string<__int16> tmp_buffer(input.cbegin(), input.cend());
-    return convert.to_bytes(tmp_buffer);
-#else
     std::wstring_convert<std::codecvt_utf8_utf16<char16_t>, char16_t> convert;
     return convert.to_bytes(input);
-#endif
 }
 
 std::u16string UTF8ToUTF16(const std::string& input) {
-#ifdef _MSC_VER
-    // Workaround for missing char16_t/char32_t instantiations in MSVC2017
-    std::wstring_convert<std::codecvt_utf8_utf16<__int16>, __int16> convert;
-    auto tmp_buffer = convert.from_bytes(input);
-    return std::u16string(tmp_buffer.cbegin(), tmp_buffer.cend());
-#else
     std::wstring_convert<std::codecvt_utf8_utf16<char16_t>, char16_t> convert;
     return convert.from_bytes(input);
-#endif
 }
 
 #ifdef _WIN32
@@ -221,28 +208,6 @@ std::u16string UTF16StringFromFixedZeroTerminatedBuffer(std::u16string_view buff
         ++len;
 
     return std::u16string(buffer.begin(), buffer.begin() + len);
-}
-
-const char* TrimSourcePath(const char* path, const char* root) {
-    const char* p = path;
-
-    while (*p != '\0') {
-        const char* next_slash = p;
-        while (*next_slash != '\0' && *next_slash != '/' && *next_slash != '\\') {
-            ++next_slash;
-        }
-
-        bool is_src = Common::ComparePartialString(p, next_slash, root);
-        p = next_slash;
-
-        if (*p != '\0') {
-            ++p;
-        }
-        if (is_src) {
-            path = p;
-        }
-    }
-    return path;
 }
 
 } // namespace Common

@@ -1,4 +1,4 @@
-// Copyright 2016 Citra Emulator Project
+// Copyright 2019 yuzu emulator team
 // Licensed under GPLv2 or any later version
 // Refer to the license.txt file included.
 
@@ -8,57 +8,48 @@
 #include "common/assert.h"
 #include "common/common_types.h"
 #include "common/logging/log.h"
-#include "core/core.h"
+#include "core/core_timing.h"
 #include "core/hle/ipc_helpers.h"
 #include "core/hle/kernel/client_port.h"
 #include "core/hle/kernel/client_session.h"
 #include "core/hle/kernel/handle_table.h"
 #include "core/hle/kernel/hle_ipc.h"
+#include "core/hle/kernel/k_scheduler.h"
+#include "core/hle/kernel/k_thread.h"
 #include "core/hle/kernel/kernel.h"
 #include "core/hle/kernel/process.h"
 #include "core/hle/kernel/server_session.h"
 #include "core/hle/kernel/session.h"
-#include "core/hle/kernel/thread.h"
+#include "core/memory.h"
 
 namespace Kernel {
 
-ServerSession::ServerSession(KernelCore& kernel) : WaitObject{kernel} {}
-ServerSession::~ServerSession() {
-    // This destructor will be called automatically when the last ServerSession handle is closed by
-    // the emulated application.
+ServerSession::ServerSession(KernelCore& kernel) : KSynchronizationObject{kernel} {}
 
-    // Decrease the port's connection count.
-    if (parent->port) {
-        parent->port->ConnectionClosed();
+ServerSession::~ServerSession() {
+    kernel.ReleaseServiceThread(service_thread);
+}
+
+ResultVal<std::shared_ptr<ServerSession>> ServerSession::Create(KernelCore& kernel,
+                                                                std::shared_ptr<Session> parent,
+                                                                std::string name) {
+    std::shared_ptr<ServerSession> session{std::make_shared<ServerSession>(kernel)};
+
+    session->name = std::move(name);
+    session->parent = std::move(parent);
+    session->service_thread = kernel.CreateServiceThread(session->name);
+
+    return MakeResult(std::move(session));
+}
+
+bool ServerSession::IsSignaled() const {
+    // Closed sessions should never wait, an error will be returned from svcReplyAndReceive.
+    if (!parent->Client()) {
+        return true;
     }
 
-    parent->server = nullptr;
-}
-
-ResultVal<SharedPtr<ServerSession>> ServerSession::Create(KernelCore& kernel, std::string name) {
-    SharedPtr<ServerSession> server_session(new ServerSession(kernel));
-
-    server_session->name = std::move(name);
-    server_session->parent = nullptr;
-
-    return MakeResult(std::move(server_session));
-}
-
-bool ServerSession::ShouldWait(const Thread* thread) const {
-    // Closed sessions should never wait, an error will be returned from svcReplyAndReceive.
-    if (parent->client == nullptr)
-        return false;
     // Wait if we have no pending requests, or if we're currently handling a request.
-    return pending_requesting_threads.empty() || currently_handling != nullptr;
-}
-
-void ServerSession::Acquire(Thread* thread) {
-    ASSERT_MSG(!ShouldWait(thread), "object unavailable!");
-    // We are now handling a request, pop it from the stack.
-    // TODO(Subv): What happens if the client endpoint is closed before any requests are made?
-    ASSERT(!pending_requesting_threads.empty());
-    currently_handling = pending_requesting_threads.back();
-    pending_requesting_threads.pop_back();
+    return !pending_requesting_threads.empty() && currently_handling == nullptr;
 }
 
 void ServerSession::ClientDisconnected() {
@@ -69,7 +60,7 @@ void ServerSession::ClientDisconnected() {
     if (handler) {
         // Note that after this returns, this server session's hle_handler is
         // invalidated (set to null).
-        handler->ClientDisconnected(this);
+        handler->ClientDisconnected(SharedFrom(this));
     }
 
     // Clean up the list of client threads with pending requests, they are unneeded now that the
@@ -120,20 +111,28 @@ ResultCode ServerSession::HandleDomainSyncRequest(Kernel::HLERequestContext& con
     }
     }
 
-    LOG_CRITICAL(IPC, "Unknown domain command={}",
-                 static_cast<int>(domain_message_header.command.Value()));
+    LOG_CRITICAL(IPC, "Unknown domain command={}", domain_message_header.command.Value());
     ASSERT(false);
     return RESULT_SUCCESS;
 }
 
-ResultCode ServerSession::HandleSyncRequest(SharedPtr<Thread> thread) {
-    // The ServerSession received a sync request, this means that there's new data available
-    // from its ClientSession, so wake up any threads that may be waiting on a svcReplyAndReceive or
-    // similar.
-    Kernel::HLERequestContext context(this, thread);
-    u32* cmd_buf = (u32*)Memory::GetPointer(thread->GetTLSAddress());
-    context.PopulateFromIncomingCommandBuffer(kernel.CurrentProcess()->GetHandleTable(), cmd_buf);
+ResultCode ServerSession::QueueSyncRequest(std::shared_ptr<KThread> thread,
+                                           Core::Memory::Memory& memory) {
+    u32* cmd_buf{reinterpret_cast<u32*>(memory.GetPointer(thread->GetTLSAddress()))};
+    auto context =
+        std::make_shared<HLERequestContext>(kernel, memory, SharedFrom(this), std::move(thread));
 
+    context->PopulateFromIncomingCommandBuffer(kernel.CurrentProcess()->GetHandleTable(), cmd_buf);
+
+    if (auto strong_ptr = service_thread.lock()) {
+        strong_ptr->QueueSyncRequest(*this, std::move(context));
+        return RESULT_SUCCESS;
+    }
+
+    return RESULT_SUCCESS;
+}
+
+ResultCode ServerSession::CompleteSyncRequest(HLERequestContext& context) {
     ResultCode result = RESULT_SUCCESS;
     // If the session has been converted to a domain, handle the domain request
     if (IsDomain() && context.HasDomainMessageHeader()) {
@@ -144,61 +143,28 @@ ResultCode ServerSession::HandleSyncRequest(SharedPtr<Thread> thread) {
         result = hle_handler->HandleSyncRequest(context);
     }
 
-    if (thread->GetStatus() == ThreadStatus::Running) {
-        // Put the thread to sleep until the server replies, it will be awoken in
-        // svcReplyAndReceive for LLE servers.
-        thread->SetStatus(ThreadStatus::WaitIPC);
-
-        if (hle_handler != nullptr) {
-            // For HLE services, we put the request threads to sleep for a short duration to
-            // simulate IPC overhead, but only if the HLE handler didn't put the thread to sleep for
-            // other reasons like an async callback. The IPC overhead is needed to prevent
-            // starvation when a thread only does sync requests to HLE services while a
-            // lower-priority thread is waiting to run.
-
-            // This delay was approximated in a homebrew application by measuring the average time
-            // it takes for svcSendSyncRequest to return when performing the SetLcdForceBlack IPC
-            // request to the GSP:GPU service in a n3DS with firmware 11.6. The measured values have
-            // a high variance and vary between models.
-            static constexpr u64 IPCDelayNanoseconds = 39000;
-            thread->WakeAfterDelay(IPCDelayNanoseconds);
-        } else {
-            // Add the thread to the list of threads that have issued a sync request with this
-            // server.
-            pending_requesting_threads.push_back(std::move(thread));
-        }
-    }
-
-    // If this ServerSession does not have an HLE implementation, just wake up the threads waiting
-    // on it.
-    WakeupAllWaitingThreads();
-
-    // Handle scenario when ConvertToDomain command was issued, as we must do the conversion at the
-    // end of the command such that only commands following this one are handled as domains
     if (convert_to_domain) {
         ASSERT_MSG(IsSession(), "ServerSession is already a domain instance.");
         domain_request_handlers = {hle_handler};
         convert_to_domain = false;
     }
 
+    // Some service requests require the thread to block
+    {
+        KScopedSchedulerLock lock(kernel);
+        if (!context.IsThreadWaiting()) {
+            context.GetThread().Wakeup();
+            context.GetThread().SetSyncedObject(nullptr, result);
+        }
+    }
+
     return result;
 }
 
-ServerSession::SessionPair ServerSession::CreateSessionPair(KernelCore& kernel,
-                                                            const std::string& name,
-                                                            SharedPtr<ClientPort> port) {
-    auto server_session = ServerSession::Create(kernel, name + "_Server").Unwrap();
-    SharedPtr<ClientSession> client_session(new ClientSession(kernel));
-    client_session->name = name + "_Client";
-
-    std::shared_ptr<Session> parent(new Session);
-    parent->client = client_session.get();
-    parent->server = server_session.get();
-    parent->port = std::move(port);
-
-    client_session->parent = parent;
-    server_session->parent = parent;
-
-    return std::make_pair(std::move(server_session), std::move(client_session));
+ResultCode ServerSession::HandleSyncRequest(std::shared_ptr<KThread> thread,
+                                            Core::Memory::Memory& memory,
+                                            Core::Timing::CoreTiming& core_timing) {
+    return QueueSyncRequest(std::move(thread), memory);
 }
+
 } // namespace Kernel

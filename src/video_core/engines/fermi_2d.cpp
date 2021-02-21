@@ -10,54 +10,58 @@
 
 namespace Tegra::Engines {
 
-Fermi2D::Fermi2D(VideoCore::RasterizerInterface& rasterizer) : rasterizer{rasterizer} {}
+Fermi2D::Fermi2D() {
+    // Nvidia's OpenGL driver seems to assume these values
+    regs.src.depth = 1;
+    regs.dst.depth = 1;
+}
 
-void Fermi2D::CallMethod(const GPU::MethodCall& method_call) {
-    ASSERT_MSG(method_call.method < Regs::NUM_REGS,
+Fermi2D::~Fermi2D() = default;
+
+void Fermi2D::BindRasterizer(VideoCore::RasterizerInterface* rasterizer_) {
+    rasterizer = rasterizer_;
+}
+
+void Fermi2D::CallMethod(u32 method, u32 method_argument, bool is_last_call) {
+    ASSERT_MSG(method < Regs::NUM_REGS,
                "Invalid Fermi2D register, increase the size of the Regs structure");
+    regs.reg_array[method] = method_argument;
 
-    regs.reg_array[method_call.method] = method_call.argument;
-
-    switch (method_call.method) {
-    // Trigger the surface copy on the last register write. This is blit_src_y, but this is 64-bit,
-    // so trigger on the second 32-bit write.
-    case FERMI2D_REG_INDEX(blit_src_y) + 1: {
-        HandleSurfaceCopy();
-        break;
-    }
+    if (method == FERMI2D_REG_INDEX(pixels_from_memory.src_y0) + 1) {
+        Blit();
     }
 }
 
-void Fermi2D::HandleSurfaceCopy() {
-    LOG_WARNING(HW_GPU, "Requested a surface copy with operation {}",
-                static_cast<u32>(regs.operation));
-
-    // TODO(Subv): Only raw copies are implemented.
-    ASSERT(regs.operation == Operation::SrcCopy);
-
-    const u32 src_blit_x1{static_cast<u32>(regs.blit_src_x >> 32)};
-    const u32 src_blit_y1{static_cast<u32>(regs.blit_src_y >> 32)};
-    u32 src_blit_x2, src_blit_y2;
-    if (regs.blit_control.origin == Origin::Corner) {
-        src_blit_x2 =
-            static_cast<u32>((regs.blit_src_x + (regs.blit_du_dx * regs.blit_dst_width)) >> 32);
-        src_blit_y2 =
-            static_cast<u32>((regs.blit_src_y + (regs.blit_dv_dy * regs.blit_dst_height)) >> 32);
-    } else {
-        src_blit_x2 = static_cast<u32>((regs.blit_src_x >> 32) + regs.blit_dst_width);
-        src_blit_y2 = static_cast<u32>((regs.blit_src_y >> 32) + regs.blit_dst_height);
+void Fermi2D::CallMultiMethod(u32 method, const u32* base_start, u32 amount, u32 methods_pending) {
+    for (u32 i = 0; i < amount; ++i) {
+        CallMethod(method, base_start[i], methods_pending - i <= 1);
     }
-    const Common::Rectangle<u32> src_rect{src_blit_x1, src_blit_y1, src_blit_x2, src_blit_y2};
-    const Common::Rectangle<u32> dst_rect{regs.blit_dst_x, regs.blit_dst_y,
-                                          regs.blit_dst_x + regs.blit_dst_width,
-                                          regs.blit_dst_y + regs.blit_dst_height};
-    Config copy_config;
-    copy_config.operation = regs.operation;
-    copy_config.filter = regs.blit_control.filter;
-    copy_config.src_rect = src_rect;
-    copy_config.dst_rect = dst_rect;
+}
 
-    if (!rasterizer.AccelerateSurfaceCopy(regs.src, regs.dst, copy_config)) {
+void Fermi2D::Blit() {
+    LOG_DEBUG(HW_GPU, "called. source address=0x{:x}, destination address=0x{:x}",
+              regs.src.Address(), regs.dst.Address());
+
+    UNIMPLEMENTED_IF_MSG(regs.operation != Operation::SrcCopy, "Operation is not copy");
+    UNIMPLEMENTED_IF_MSG(regs.src.layer != 0, "Source layer is not zero");
+    UNIMPLEMENTED_IF_MSG(regs.dst.layer != 0, "Destination layer is not zero");
+    UNIMPLEMENTED_IF_MSG(regs.src.depth != 1, "Source depth is not one");
+    UNIMPLEMENTED_IF_MSG(regs.clip_enable != 0, "Clipped blit enabled");
+
+    const auto& args = regs.pixels_from_memory;
+    const Config config{
+        .operation = regs.operation,
+        .filter = args.sample_mode.filter,
+        .dst_x0 = args.dst_x0,
+        .dst_y0 = args.dst_y0,
+        .dst_x1 = args.dst_x0 + args.dst_width,
+        .dst_y1 = args.dst_y0 + args.dst_height,
+        .src_x0 = static_cast<s32>(args.src_x0 >> 32),
+        .src_y0 = static_cast<s32>(args.src_y0 >> 32),
+        .src_x1 = static_cast<s32>((args.du_dx * args.dst_width + args.src_x0) >> 32),
+        .src_y1 = static_cast<s32>((args.dv_dy * args.dst_height + args.src_y0) >> 32),
+    };
+    if (!rasterizer->AccelerateSurfaceCopy(regs.src, regs.dst, config)) {
         UNIMPLEMENTED();
     }
 }

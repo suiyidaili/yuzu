@@ -5,6 +5,10 @@ function(get_timestamp _var)
 endfunction()
 
 list(APPEND CMAKE_MODULE_PATH "${SRC_DIR}/externals/cmake-modules")
+
+# Find the package here with the known path so that the GetGit commands can find it as well
+find_package(Git QUIET PATHS "${GIT_EXECUTABLE}")
+
 # generate git/build information
 include(GetGitRevisionDescription)
 get_git_head_revision(GIT_REF_SPEC GIT_REV)
@@ -47,14 +51,14 @@ endif()
 # The variable SRC_DIR must be passed into the script (since it uses the current build directory for all values of CMAKE_*_DIR)
 set(VIDEO_CORE "${SRC_DIR}/src/video_core")
 set(HASH_FILES
+    "${VIDEO_CORE}/renderer_opengl/gl_arb_decompiler.cpp"
+    "${VIDEO_CORE}/renderer_opengl/gl_arb_decompiler.h"
     "${VIDEO_CORE}/renderer_opengl/gl_shader_cache.cpp"
     "${VIDEO_CORE}/renderer_opengl/gl_shader_cache.h"
     "${VIDEO_CORE}/renderer_opengl/gl_shader_decompiler.cpp"
     "${VIDEO_CORE}/renderer_opengl/gl_shader_decompiler.h"
     "${VIDEO_CORE}/renderer_opengl/gl_shader_disk_cache.cpp"
     "${VIDEO_CORE}/renderer_opengl/gl_shader_disk_cache.h"
-    "${VIDEO_CORE}/renderer_opengl/gl_shader_gen.cpp"
-    "${VIDEO_CORE}/renderer_opengl/gl_shader_gen.h"
     "${VIDEO_CORE}/shader/decode/arithmetic.cpp"
     "${VIDEO_CORE}/shader/decode/arithmetic_half.cpp"
     "${VIDEO_CORE}/shader/decode/arithmetic_half_immediate.cpp"
@@ -83,15 +87,25 @@ set(HASH_FILES
     "${VIDEO_CORE}/shader/decode/video.cpp"
     "${VIDEO_CORE}/shader/decode/warp.cpp"
     "${VIDEO_CORE}/shader/decode/xmad.cpp"
+    "${VIDEO_CORE}/shader/ast.cpp"
+    "${VIDEO_CORE}/shader/ast.h"
+    "${VIDEO_CORE}/shader/compiler_settings.cpp"
+    "${VIDEO_CORE}/shader/compiler_settings.h"
     "${VIDEO_CORE}/shader/control_flow.cpp"
     "${VIDEO_CORE}/shader/control_flow.h"
     "${VIDEO_CORE}/shader/decode.cpp"
+    "${VIDEO_CORE}/shader/expr.cpp"
+    "${VIDEO_CORE}/shader/expr.h"
     "${VIDEO_CORE}/shader/node.h"
     "${VIDEO_CORE}/shader/node_helper.cpp"
     "${VIDEO_CORE}/shader/node_helper.h"
+    "${VIDEO_CORE}/shader/registry.cpp"
+    "${VIDEO_CORE}/shader/registry.h"
     "${VIDEO_CORE}/shader/shader_ir.cpp"
     "${VIDEO_CORE}/shader/shader_ir.h"
     "${VIDEO_CORE}/shader/track.cpp"
+    "${VIDEO_CORE}/shader/transform_feedback.cpp"
+    "${VIDEO_CORE}/shader/transform_feedback.h"
 )
 set(COMBINED "")
 foreach (F IN LISTS HASH_FILES)

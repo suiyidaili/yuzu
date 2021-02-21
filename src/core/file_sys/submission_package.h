@@ -10,6 +10,10 @@
 #include "common/common_types.h"
 #include "core/file_sys/vfs.h"
 
+namespace Core::Crypto {
+class KeyManager;
+}
+
 namespace Loader {
 enum class ResultStatus : u16;
 }
@@ -23,7 +27,7 @@ enum class ContentRecordType : u8;
 
 class NSP : public ReadOnlyVfsDirectory {
 public:
-    explicit NSP(VirtualFile file);
+    explicit NSP(VirtualFile file, std::size_t program_index = 0);
     ~NSP() override;
 
     Loader::ResultStatus GetStatus() const;
@@ -59,10 +63,13 @@ public:
     VirtualDir GetParentDirectory() const override;
 
 private:
+    void SetTicketKeys(const std::vector<VirtualFile>& files);
     void InitializeExeFSAndRomFS(const std::vector<VirtualFile>& files);
     void ReadNCAs(const std::vector<VirtualFile>& files);
 
     VirtualFile file;
+
+    const std::size_t program_index;
 
     bool extracted = false;
     Loader::ResultStatus status;
@@ -73,7 +80,7 @@ private:
     std::map<u64, std::map<std::pair<TitleType, ContentRecordType>, std::shared_ptr<NCA>>> ncas;
     std::vector<VirtualFile> ticket_files;
 
-    Core::Crypto::KeyManager keys;
+    Core::Crypto::KeyManager& keys;
 
     VirtualFile romfs;
     VirtualDir exefs;

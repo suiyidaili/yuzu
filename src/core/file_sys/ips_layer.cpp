@@ -245,9 +245,11 @@ void IPSwitchCompiler::Parse() {
 
             // Read rest of patch
             while (true) {
-                if (i + 1 >= lines.size())
+                if (i + 1 >= lines.size()) {
                     break;
-                const auto patch_line = lines[++i];
+                }
+
+                const auto& patch_line = lines[++i];
 
                 // Start of new patch
                 if (StartsWith(patch_line, "@enabled") || StartsWith(patch_line, "@disabled")) {
@@ -297,7 +299,7 @@ void IPSwitchCompiler::Parse() {
                              patch_text->GetName(), offset, Common::HexToString(replace));
                 }
 
-                patch.records.insert_or_assign(offset, std::move(replace));
+                patch.records.insert_or_assign(static_cast<u32>(offset), std::move(replace));
             }
 
             patches.push_back(std::move(patch));

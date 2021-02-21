@@ -1,35 +1,59 @@
-// Copyright 2008 Dolphin Emulator Project / 2017 Citra Emulator Project
-// Licensed under GPLv2+
+// Copyright 2020 yuzu Emulator Project
+// Licensed under GPLv2 or any later version
 // Refer to the license.txt file included.
 
 #pragma once
 
 #include <chrono>
+
 #include "common/common_types.h"
+#include "core/hardware_properties.h"
 
 namespace Core::Timing {
 
-// The below clock rate is based on Switch's clockspeed being widely known as 1.020GHz
-// The exact value used is of course unverified.
-constexpr u64 BASE_CLOCK_RATE = 1019215872; // Switch clock speed is 1020MHz un/docked
-constexpr u64 CNTFREQ = 19200000;           // Value from fusee.
+namespace detail {
+constexpr u64 CNTFREQ_ADJUSTED = Hardware::CNTFREQ / 1000;
+constexpr u64 BASE_CLOCK_RATE_ADJUSTED = Hardware::BASE_CLOCK_RATE / 1000;
+} // namespace detail
 
-s64 msToCycles(std::chrono::milliseconds ms);
-s64 usToCycles(std::chrono::microseconds us);
-s64 nsToCycles(std::chrono::nanoseconds ns);
-
-inline std::chrono::milliseconds CyclesToMs(s64 cycles) {
-    return std::chrono::milliseconds(cycles * 1000 / BASE_CLOCK_RATE);
+[[nodiscard]] constexpr s64 msToCycles(std::chrono::milliseconds ms) {
+    return ms.count() * detail::BASE_CLOCK_RATE_ADJUSTED;
 }
 
-inline std::chrono::nanoseconds CyclesToNs(s64 cycles) {
-    return std::chrono::nanoseconds(cycles * 1000000000 / BASE_CLOCK_RATE);
+[[nodiscard]] constexpr s64 usToCycles(std::chrono::microseconds us) {
+    return us.count() * detail::BASE_CLOCK_RATE_ADJUSTED / 1000;
 }
 
-inline std::chrono::microseconds CyclesToUs(s64 cycles) {
-    return std::chrono::microseconds(cycles * 1000000 / BASE_CLOCK_RATE);
+[[nodiscard]] constexpr s64 nsToCycles(std::chrono::nanoseconds ns) {
+    return ns.count() * detail::BASE_CLOCK_RATE_ADJUSTED / 1000000;
 }
 
-u64 CpuCyclesToClockCycles(u64 ticks);
+[[nodiscard]] constexpr u64 msToClockCycles(std::chrono::milliseconds ms) {
+    return static_cast<u64>(ms.count()) * detail::CNTFREQ_ADJUSTED;
+}
+
+[[nodiscard]] constexpr u64 usToClockCycles(std::chrono::microseconds us) {
+    return us.count() * detail::CNTFREQ_ADJUSTED / 1000;
+}
+
+[[nodiscard]] constexpr u64 nsToClockCycles(std::chrono::nanoseconds ns) {
+    return ns.count() * detail::CNTFREQ_ADJUSTED / 1000000;
+}
+
+[[nodiscard]] constexpr u64 CpuCyclesToClockCycles(u64 ticks) {
+    return ticks * detail::CNTFREQ_ADJUSTED / detail::BASE_CLOCK_RATE_ADJUSTED;
+}
+
+[[nodiscard]] constexpr std::chrono::milliseconds CyclesToMs(s64 cycles) {
+    return std::chrono::milliseconds(cycles / detail::BASE_CLOCK_RATE_ADJUSTED);
+}
+
+[[nodiscard]] constexpr std::chrono::nanoseconds CyclesToNs(s64 cycles) {
+    return std::chrono::nanoseconds(cycles * 1000000 / detail::BASE_CLOCK_RATE_ADJUSTED);
+}
+
+[[nodiscard]] constexpr std::chrono::microseconds CyclesToUs(s64 cycles) {
+    return std::chrono::microseconds(cycles * 1000 / detail::BASE_CLOCK_RATE_ADJUSTED);
+}
 
 } // namespace Core::Timing

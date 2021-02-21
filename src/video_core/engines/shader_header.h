@@ -4,6 +4,9 @@
 
 #pragma once
 
+#include <array>
+#include <optional>
+
 #include "common/bit_field.h"
 #include "common/common_funcs.h"
 #include "common/common_types.h"
@@ -16,7 +19,7 @@ enum class OutputTopology : u32 {
     TriangleStrip = 7,
 };
 
-enum class AttributeUse : u8 {
+enum class PixelImap : u8 {
     Unused = 0,
     Constant = 1,
     Perspective = 2,
@@ -24,7 +27,7 @@ enum class AttributeUse : u8 {
 };
 
 // Documentation in:
-// http://download.nvidia.com/open-gpu-doc/Shader-Program-Header/1/Shader-Program-Header.html#ImapTexture
+// http://download.nvidia.com/open-gpu-doc/Shader-Program-Header/1/Shader-Program-Header.html
 struct Header {
     union {
         BitField<0, 5, u32> sph_type;
@@ -59,16 +62,16 @@ struct Header {
     union {
         BitField<0, 12, u32> max_output_vertices;
         BitField<12, 8, u32> store_req_start; // NOTE: not used by geometry shaders.
-        BitField<24, 4, u32> reserved;
-        BitField<12, 8, u32> store_req_end; // NOTE: not used by geometry shaders.
+        BitField<20, 4, u32> reserved;
+        BitField<24, 8, u32> store_req_end; // NOTE: not used by geometry shaders.
     } common4;
 
     union {
         struct {
-            INSERT_PADDING_BYTES(3);  // ImapSystemValuesA
-            INSERT_PADDING_BYTES(1);  // ImapSystemValuesB
-            INSERT_PADDING_BYTES(16); // ImapGenericVector[32]
-            INSERT_PADDING_BYTES(2);  // ImapColor
+            INSERT_PADDING_BYTES_NOINIT(3);  // ImapSystemValuesA
+            INSERT_PADDING_BYTES_NOINIT(1);  // ImapSystemValuesB
+            INSERT_PADDING_BYTES_NOINIT(16); // ImapGenericVector[32]
+            INSERT_PADDING_BYTES_NOINIT(2);  // ImapColor
             union {
                 BitField<0, 8, u16> clip_distances;
                 BitField<8, 1, u16> point_sprite_s;
@@ -79,31 +82,34 @@ struct Header {
                 BitField<14, 1, u16> instance_id;
                 BitField<15, 1, u16> vertex_id;
             };
-            INSERT_PADDING_BYTES(5);  // ImapFixedFncTexture[10]
-            INSERT_PADDING_BYTES(1);  // ImapReserved
-            INSERT_PADDING_BYTES(3);  // OmapSystemValuesA
-            INSERT_PADDING_BYTES(1);  // OmapSystemValuesB
-            INSERT_PADDING_BYTES(16); // OmapGenericVector[32]
-            INSERT_PADDING_BYTES(2);  // OmapColor
-            INSERT_PADDING_BYTES(2);  // OmapSystemValuesC
-            INSERT_PADDING_BYTES(5);  // OmapFixedFncTexture[10]
-            INSERT_PADDING_BYTES(1);  // OmapReserved
+            INSERT_PADDING_BYTES_NOINIT(5);  // ImapFixedFncTexture[10]
+            INSERT_PADDING_BYTES_NOINIT(1);  // ImapReserved
+            INSERT_PADDING_BYTES_NOINIT(3);  // OmapSystemValuesA
+            INSERT_PADDING_BYTES_NOINIT(1);  // OmapSystemValuesB
+            INSERT_PADDING_BYTES_NOINIT(16); // OmapGenericVector[32]
+            INSERT_PADDING_BYTES_NOINIT(2);  // OmapColor
+            INSERT_PADDING_BYTES_NOINIT(2);  // OmapSystemValuesC
+            INSERT_PADDING_BYTES_NOINIT(5);  // OmapFixedFncTexture[10]
+            INSERT_PADDING_BYTES_NOINIT(1);  // OmapReserved
         } vtg;
 
         struct {
-            INSERT_PADDING_BYTES(3); // ImapSystemValuesA
-            INSERT_PADDING_BYTES(1); // ImapSystemValuesB
+            INSERT_PADDING_BYTES_NOINIT(3); // ImapSystemValuesA
+            INSERT_PADDING_BYTES_NOINIT(1); // ImapSystemValuesB
+
             union {
-                BitField<0, 2, AttributeUse> x;
-                BitField<2, 2, AttributeUse> y;
-                BitField<4, 2, AttributeUse> w;
-                BitField<6, 2, AttributeUse> z;
+                BitField<0, 2, PixelImap> x;
+                BitField<2, 2, PixelImap> y;
+                BitField<4, 2, PixelImap> z;
+                BitField<6, 2, PixelImap> w;
                 u8 raw;
             } imap_generic_vector[32];
-            INSERT_PADDING_BYTES(2);  // ImapColor
-            INSERT_PADDING_BYTES(2);  // ImapSystemValuesC
-            INSERT_PADDING_BYTES(10); // ImapFixedFncTexture[10]
-            INSERT_PADDING_BYTES(2);  // ImapReserved
+
+            INSERT_PADDING_BYTES_NOINIT(2);  // ImapColor
+            INSERT_PADDING_BYTES_NOINIT(2);  // ImapSystemValuesC
+            INSERT_PADDING_BYTES_NOINIT(10); // ImapFixedFncTexture[10]
+            INSERT_PADDING_BYTES_NOINIT(2);  // ImapReserved
+
             struct {
                 u32 target;
                 union {
@@ -112,33 +118,34 @@ struct Header {
                     BitField<2, 30, u32> reserved;
                 };
             } omap;
+
             bool IsColorComponentOutputEnabled(u32 render_target, u32 component) const {
                 const u32 bit = render_target * 4 + component;
                 return omap.target & (1 << bit);
             }
-            AttributeUse GetAttributeIndexUse(u32 attribute, u32 index) const {
-                return static_cast<AttributeUse>(
-                    (imap_generic_vector[attribute].raw >> (index * 2)) & 0x03);
-            }
-            AttributeUse GetAttributeUse(u32 attribute) const {
-                AttributeUse result = AttributeUse::Unused;
-                for (u32 i = 0; i < 4; i++) {
-                    const auto index = GetAttributeIndexUse(attribute, i);
-                    if (index == AttributeUse::Unused) {
+
+            PixelImap GetPixelImap(u32 attribute) const {
+                const auto get_index = [this, attribute](u32 index) {
+                    return static_cast<PixelImap>(
+                        (imap_generic_vector[attribute].raw >> (index * 2)) & 3);
+                };
+
+                std::optional<PixelImap> result;
+                for (u32 component = 0; component < 4; ++component) {
+                    const PixelImap index = get_index(component);
+                    if (index == PixelImap::Unused) {
                         continue;
                     }
-                    if (result == AttributeUse::Unused || result == index) {
-                        result = index;
-                        continue;
+                    if (result && result != index) {
+                        LOG_CRITICAL(HW_GPU, "Generic attribute conflict in interpolation mode");
                     }
-                    LOG_CRITICAL(HW_GPU, "Generic Attribute Conflict in Interpolation Mode");
-                    if (index == AttributeUse::Perspective) {
-                        result = index;
-                    }
+                    result = index;
                 }
-                return result;
+                return result.value_or(PixelImap::Unused);
             }
         } ps;
+
+        std::array<u32, 0xF> raw;
     };
 
     u64 GetLocalMemorySize() const {
@@ -146,7 +153,6 @@ struct Header {
                 (common2.shader_local_memory_high_size << 24));
     }
 };
-
 static_assert(sizeof(Header) == 0x50, "Incorrect structure size");
 
 } // namespace Tegra::Shader

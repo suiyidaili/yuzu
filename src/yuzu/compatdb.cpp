@@ -54,7 +54,8 @@ void CompatDB::Submit() {
         back();
         LOG_DEBUG(Frontend, "Compatibility Rating: {}", compatibility->checkedId());
         Core::System::GetInstance().TelemetrySession().AddField(
-            Telemetry::FieldType::UserFeedback, "Compatibility", compatibility->checkedId());
+            Common::Telemetry::FieldType::UserFeedback, "Compatibility",
+            compatibility->checkedId());
 
         button(NextButton)->setEnabled(false);
         button(NextButton)->setText(tr("Submitting"));
@@ -71,7 +72,7 @@ void CompatDB::Submit() {
 void CompatDB::OnTestcaseSubmitted() {
     if (!testcase_watcher.result()) {
         QMessageBox::critical(this, tr("Communication error"),
-                              tr("An error occured while sending the Testcase"));
+                              tr("An error occurred while sending the Testcase"));
         button(NextButton)->setEnabled(true);
         button(NextButton)->setText(tr("Next"));
         button(CancelButton)->setVisible(true);

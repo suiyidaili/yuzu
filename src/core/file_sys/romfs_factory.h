@@ -13,7 +13,14 @@ namespace Loader {
 class AppLoader;
 } // namespace Loader
 
+namespace Service::FileSystem {
+class FileSystemController;
+}
+
 namespace FileSys {
+
+class ContentProvider;
+class NCA;
 
 enum class ContentRecordType : u8;
 
@@ -29,18 +36,30 @@ enum class StorageId : u8 {
 /// File system interface to the RomFS archive
 class RomFSFactory {
 public:
-    explicit RomFSFactory(Loader::AppLoader& app_loader);
+    explicit RomFSFactory(Loader::AppLoader& app_loader, ContentProvider& provider,
+                          Service::FileSystem::FileSystemController& controller);
     ~RomFSFactory();
 
     void SetPackedUpdate(VirtualFile update_raw);
-    ResultVal<VirtualFile> OpenCurrentProcess();
-    ResultVal<VirtualFile> Open(u64 title_id, StorageId storage, ContentRecordType type);
+    [[nodiscard]] ResultVal<VirtualFile> OpenCurrentProcess(u64 current_process_title_id) const;
+    [[nodiscard]] ResultVal<VirtualFile> OpenPatchedRomFS(u64 title_id,
+                                                          ContentRecordType type) const;
+    [[nodiscard]] ResultVal<VirtualFile> OpenPatchedRomFSWithProgramIndex(
+        u64 title_id, u8 program_index, ContentRecordType type) const;
+    [[nodiscard]] ResultVal<VirtualFile> Open(u64 title_id, StorageId storage,
+                                              ContentRecordType type) const;
 
 private:
+    [[nodiscard]] std::shared_ptr<NCA> GetEntry(u64 title_id, StorageId storage,
+                                                ContentRecordType type) const;
+
     VirtualFile file;
     VirtualFile update_raw;
     bool updatable;
     u64 ivfc_offset;
+
+    ContentProvider& content_provider;
+    Service::FileSystem::FileSystemController& filesystem_controller;
 };
 
 } // namespace FileSys

@@ -2,40 +2,40 @@
 // Licensed under GPLv2 or any later version
 // Refer to the license.txt file included.
 
+#include <array>
 #include <atomic>
 
 #include "common/logging/log.h"
 #include "core/core.h"
 #include "core/hle/ipc_helpers.h"
+#include "core/hle/kernel/k_event.h"
+#include "core/hle/kernel/k_readable_event.h"
+#include "core/hle/kernel/k_thread.h"
+#include "core/hle/kernel/k_writable_event.h"
 #include "core/hle/kernel/kernel.h"
-#include "core/hle/kernel/readable_event.h"
-#include "core/hle/kernel/thread.h"
-#include "core/hle/kernel/writable_event.h"
 #include "core/hle/lock.h"
 #include "core/hle/service/nfp/nfp.h"
 #include "core/hle/service/nfp/nfp_user.h"
 
 namespace Service::NFP {
-
 namespace ErrCodes {
-constexpr ResultCode ERR_TAG_FAILED(ErrorModule::NFP,
-                                    -1); // TODO(ogniK): Find the actual error code
 constexpr ResultCode ERR_NO_APPLICATION_AREA(ErrorModule::NFP, 152);
 } // namespace ErrCodes
 
-Module::Interface::Interface(std::shared_ptr<Module> module, const char* name)
-    : ServiceFramework(name), module(std::move(module)) {
-    auto& kernel = Core::System::GetInstance().Kernel();
-    nfc_tag_load = Kernel::WritableEvent::CreateEventPair(kernel, Kernel::ResetType::Automatic,
-                                                          "IUser:NFCTagDetected");
+Module::Interface::Interface(std::shared_ptr<Module> module_, Core::System& system_,
+                             const char* name)
+    : ServiceFramework{system_, name}, module{std::move(module_)} {
+    auto& kernel = system.Kernel();
+    nfc_tag_load = Kernel::KEvent::Create(kernel, "IUser:NFCTagDetected");
+    nfc_tag_load->Initialize();
 }
 
 Module::Interface::~Interface() = default;
 
 class IUser final : public ServiceFramework<IUser> {
 public:
-    IUser(Module::Interface& nfp_interface)
-        : ServiceFramework("NFP::IUser"), nfp_interface(nfp_interface) {
+    explicit IUser(Module::Interface& nfp_interface_, Core::System& system_)
+        : ServiceFramework{system_, "NFP::IUser"}, nfp_interface{nfp_interface_} {
         static const FunctionInfo functions[] = {
             {0, &IUser::Initialize, "Initialize"},
             {1, &IUser::Finalize, "Finalize"},
@@ -65,11 +65,11 @@ public:
         };
         RegisterHandlers(functions);
 
-        auto& kernel = Core::System::GetInstance().Kernel();
-        deactivate_event = Kernel::WritableEvent::CreateEventPair(
-            kernel, Kernel::ResetType::Automatic, "IUser:DeactivateEvent");
-        availability_change_event = Kernel::WritableEvent::CreateEventPair(
-            kernel, Kernel::ResetType::Automatic, "IUser:AvailabilityChangeEvent");
+        auto& kernel = system.Kernel();
+        deactivate_event = Kernel::KEvent::Create(kernel, "IUser:DeactivateEvent");
+        deactivate_event->Initialize();
+        availability_change_event = Kernel::KEvent::Create(kernel, "IUser:AvailabilityChangeEvent");
+        availability_change_event->Initialize();
     }
 
 private:
@@ -77,10 +77,10 @@ private:
         std::array<u8, 10> uuid;
         u8 uuid_length; // TODO(ogniK): Figure out if this is actual the uuid length or does it
                         // mean something else
-        INSERT_PADDING_BYTES(0x15);
+        std::array<u8, 0x15> padding_1;
         u32_le protocol;
         u32_le tag_type;
-        INSERT_PADDING_BYTES(0x2c);
+        std::array<u8, 0x2c> padding_2;
     };
     static_assert(sizeof(TagInfo) == 0x54, "TagInfo is an invalid size");
 
@@ -132,7 +132,7 @@ private:
         const u32 array_size = rp.Pop<u32>();
         LOG_DEBUG(Service_NFP, "called, array_size={}", array_size);
 
-        ctx.WriteBuffer(&device_handle, sizeof(device_handle));
+        ctx.WriteBuffer(device_handle);
 
         IPC::ResponseBuilder rb{ctx, 3};
         rb.Push(RESULT_SUCCESS);
@@ -167,7 +167,7 @@ private:
 
         IPC::ResponseBuilder rb{ctx, 2, 1};
         rb.Push(RESULT_SUCCESS);
-        rb.PushCopyObjects(deactivate_event.readable);
+        rb.PushCopyObjects(deactivate_event->GetReadableEvent());
     }
 
     void StopDetection(Kernel::HLERequestContext& ctx) {
@@ -176,12 +176,14 @@ private:
         switch (device_state) {
         case DeviceState::TagFound:
         case DeviceState::TagNearby:
-            deactivate_event.writable->Signal();
+            deactivate_event->GetWritableEvent()->Signal();
             device_state = DeviceState::Initialized;
             break;
         case DeviceState::SearchingForTag:
         case DeviceState::TagRemoved:
             device_state = DeviceState::Initialized;
+            break;
+        default:
             break;
         }
         IPC::ResponseBuilder rb{ctx, 2};
@@ -190,12 +192,6 @@ private:
 
     void GetDeviceState(Kernel::HLERequestContext& ctx) {
         LOG_DEBUG(Service_NFP, "called");
-
-        auto nfc_event = nfp_interface.GetNFCEvent();
-        if (!nfc_event->ShouldWait(Kernel::GetCurrentThread()) && !has_attached_handle) {
-            device_state = DeviceState::TagFound;
-            nfc_event->Clear();
-        }
 
         IPC::ResponseBuilder rb{ctx, 3};
         rb.Push(RESULT_SUCCESS);
@@ -216,14 +212,16 @@ private:
         LOG_DEBUG(Service_NFP, "called");
 
         IPC::ResponseBuilder rb{ctx, 2};
-        auto amiibo = nfp_interface.GetAmiiboBuffer();
-        TagInfo tag_info{};
-        tag_info.uuid = amiibo.uuid;
-        tag_info.uuid_length = static_cast<u8>(tag_info.uuid.size());
-
-        tag_info.protocol = 1; // TODO(ogniK): Figure out actual values
-        tag_info.tag_type = 2;
-        ctx.WriteBuffer(&tag_info, sizeof(TagInfo));
+        const auto& amiibo = nfp_interface.GetAmiiboBuffer();
+        const TagInfo tag_info{
+            .uuid = amiibo.uuid,
+            .uuid_length = static_cast<u8>(amiibo.uuid.size()),
+            .padding_1 = {},
+            .protocol = 1, // TODO(ogniK): Figure out actual values
+            .tag_type = 2,
+            .padding_2 = {},
+        };
+        ctx.WriteBuffer(tag_info);
         rb.Push(RESULT_SUCCESS);
     }
 
@@ -239,8 +237,8 @@ private:
         LOG_DEBUG(Service_NFP, "called");
 
         IPC::ResponseBuilder rb{ctx, 2};
-        auto amiibo = nfp_interface.GetAmiiboBuffer();
-        ctx.WriteBuffer(&amiibo.model_info, sizeof(amiibo.model_info));
+        const auto& amiibo = nfp_interface.GetAmiiboBuffer();
+        ctx.WriteBuffer(amiibo.model_info);
         rb.Push(RESULT_SUCCESS);
     }
 
@@ -267,7 +265,7 @@ private:
 
         IPC::ResponseBuilder rb{ctx, 2, 1};
         rb.Push(RESULT_SUCCESS);
-        rb.PushCopyObjects(availability_change_event.readable);
+        rb.PushCopyObjects(availability_change_event->GetReadableEvent());
     }
 
     void GetRegisterInfo(Kernel::HLERequestContext& ctx) {
@@ -286,7 +284,7 @@ private:
 
         CommonInfo common_info{};
         common_info.application_area_size = 0;
-        ctx.WriteBuffer(&common_info, sizeof(CommonInfo));
+        ctx.WriteBuffer(common_info);
 
         IPC::ResponseBuilder rb{ctx, 2};
         rb.Push(RESULT_SUCCESS);
@@ -321,8 +319,8 @@ private:
     const u32 npad_id{0};       // Player 1 controller
     State state{State::NonInitialized};
     DeviceState device_state{DeviceState::Initialized};
-    Kernel::EventPair deactivate_event;
-    Kernel::EventPair availability_change_event;
+    std::shared_ptr<Kernel::KEvent> deactivate_event;
+    std::shared_ptr<Kernel::KEvent> availability_change_event;
     const Module::Interface& nfp_interface;
 };
 
@@ -331,7 +329,7 @@ void Module::Interface::CreateUserInterface(Kernel::HLERequestContext& ctx) {
 
     IPC::ResponseBuilder rb{ctx, 2, 0, 1};
     rb.Push(RESULT_SUCCESS);
-    rb.PushIpcInterface<IUser>(*this);
+    rb.PushIpcInterface<IUser>(*this, system);
 }
 
 bool Module::Interface::LoadAmiibo(const std::vector<u8>& buffer) {
@@ -341,21 +339,21 @@ bool Module::Interface::LoadAmiibo(const std::vector<u8>& buffer) {
     }
 
     std::memcpy(&amiibo, buffer.data(), sizeof(amiibo));
-    nfc_tag_load.writable->Signal();
+    nfc_tag_load->GetWritableEvent()->Signal();
     return true;
 }
 
-const Kernel::SharedPtr<Kernel::ReadableEvent>& Module::Interface::GetNFCEvent() const {
-    return nfc_tag_load.readable;
+const std::shared_ptr<Kernel::KReadableEvent>& Module::Interface::GetNFCEvent() const {
+    return nfc_tag_load->GetReadableEvent();
 }
 
 const Module::Interface::AmiiboFile& Module::Interface::GetAmiiboBuffer() const {
     return amiibo;
 }
 
-void InstallInterfaces(SM::ServiceManager& service_manager) {
+void InstallInterfaces(SM::ServiceManager& service_manager, Core::System& system) {
     auto module = std::make_shared<Module>();
-    std::make_shared<NFP_User>(module)->InstallAsService(service_manager);
+    std::make_shared<NFP_User>(module, system)->InstallAsService(service_manager);
 }
 
 } // namespace Service::NFP

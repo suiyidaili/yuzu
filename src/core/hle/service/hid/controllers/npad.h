@@ -5,13 +5,18 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include "common/bit_field.h"
 #include "common/common_types.h"
 #include "core/frontend/input.h"
 #include "core/hle/kernel/object.h"
-#include "core/hle/kernel/writable_event.h"
 #include "core/hle/service/hid/controllers/controller_base.h"
 #include "core/settings.h"
+
+namespace Kernel {
+class KEvent;
+class KReadableEvent;
+} // namespace Kernel
 
 namespace Service::HID {
 
@@ -20,7 +25,7 @@ constexpr u32 NPAD_UNKNOWN = 16; // TODO(ogniK): What is this?
 
 class Controller_NPad final : public ControllerBase {
 public:
-    Controller_NPad();
+    explicit Controller_NPad(Core::System& system);
     ~Controller_NPad() override;
 
     // Called when the controller is initialized
@@ -32,41 +37,12 @@ public:
     // When the controller is requesting an update for the shared memory
     void OnUpdate(const Core::Timing::CoreTiming& core_timing, u8* data, std::size_t size) override;
 
+    // When the controller is requesting a motion update for the shared memory
+    void OnMotionUpdate(const Core::Timing::CoreTiming& core_timing, u8* data,
+                        std::size_t size) override;
+
     // Called when input devices should be loaded
     void OnLoadInputDevices() override;
-
-    struct NPadType {
-        union {
-            u32_le raw{};
-
-            BitField<0, 1, u32> pro_controller;
-            BitField<1, 1, u32> handheld;
-            BitField<2, 1, u32> joycon_dual;
-            BitField<3, 1, u32> joycon_left;
-            BitField<4, 1, u32> joycon_right;
-
-            BitField<6, 1, u32> pokeball; // TODO(ogniK): Confirm when possible
-        };
-    };
-    static_assert(sizeof(NPadType) == 4, "NPadType is an invalid size");
-
-    struct Vibration {
-        f32 amp_low;
-        f32 freq_low;
-        f32 amp_high;
-        f32 freq_high;
-    };
-    static_assert(sizeof(Vibration) == 0x10, "Vibration is an invalid size");
-
-    enum class NpadHoldType : u64 {
-        Vertical = 0,
-        Horizontal = 1,
-    };
-
-    enum class NPadAssignments : u32_le {
-        Dual = 0,
-        Single = 1,
-    };
 
     enum class NPadControllerType {
         None,
@@ -75,7 +51,98 @@ public:
         JoyDual,
         JoyLeft,
         JoyRight,
+        GameCube,
         Pokeball,
+    };
+
+    enum class NpadType : u8 {
+        ProController = 3,
+        Handheld = 4,
+        JoyconDual = 5,
+        JoyconLeft = 6,
+        JoyconRight = 7,
+        GameCube = 8,
+        Pokeball = 9,
+        MaxNpadType = 10,
+    };
+
+    enum class DeviceIndex : u8 {
+        Left = 0,
+        Right = 1,
+        None = 2,
+        MaxDeviceIndex = 3,
+    };
+
+    enum class GyroscopeZeroDriftMode : u32 {
+        Loose = 0,
+        Standard = 1,
+        Tight = 2,
+    };
+
+    enum class NpadHoldType : u64 {
+        Vertical = 0,
+        Horizontal = 1,
+    };
+
+    enum class NpadAssignments : u32 {
+        Dual = 0,
+        Single = 1,
+    };
+
+    enum class NpadHandheldActivationMode : u64 {
+        Dual = 0,
+        Single = 1,
+        None = 2,
+    };
+
+    enum class NpadCommunicationMode : u64 {
+        Mode_5ms = 0,
+        Mode_10ms = 1,
+        Mode_15ms = 2,
+        Default = 3,
+    };
+
+    struct DeviceHandle {
+        NpadType npad_type;
+        u8 npad_id;
+        DeviceIndex device_index;
+        INSERT_PADDING_BYTES_NOINIT(1);
+    };
+    static_assert(sizeof(DeviceHandle) == 4, "DeviceHandle is an invalid size");
+
+    struct NpadStyleSet {
+        union {
+            u32_le raw{};
+
+            BitField<0, 1, u32> fullkey;
+            BitField<1, 1, u32> handheld;
+            BitField<2, 1, u32> joycon_dual;
+            BitField<3, 1, u32> joycon_left;
+            BitField<4, 1, u32> joycon_right;
+            BitField<5, 1, u32> gamecube;
+            BitField<6, 1, u32> palma;
+            BitField<7, 1, u32> lark;
+            BitField<8, 1, u32> handheld_lark;
+            BitField<9, 1, u32> lucia;
+            BitField<29, 1, u32> system_ext;
+            BitField<30, 1, u32> system;
+        };
+    };
+    static_assert(sizeof(NpadStyleSet) == 4, "NpadStyleSet is an invalid size");
+
+    struct VibrationValue {
+        f32 amp_low;
+        f32 freq_low;
+        f32 amp_high;
+        f32 freq_high;
+    };
+    static_assert(sizeof(VibrationValue) == 0x10, "Vibration is an invalid size");
+
+    static constexpr VibrationValue DEFAULT_VIBRATION_VALUE{
+        .amp_low = 0.0f,
+        .freq_low = 160.0f,
+        .amp_high = 0.0f,
+        .freq_high = 320.0f,
     };
 
     struct LedPattern {
@@ -94,37 +161,70 @@ public:
         };
     };
 
-    void SetSupportedStyleSet(NPadType style_set);
-    NPadType GetSupportedStyleSet() const;
+    void SetSupportedStyleSet(NpadStyleSet style_set);
+    NpadStyleSet GetSupportedStyleSet() const;
 
-    void SetSupportedNPadIdTypes(u8* data, std::size_t length);
+    void SetSupportedNpadIdTypes(u8* data, std::size_t length);
     void GetSupportedNpadIdTypes(u32* data, std::size_t max_length);
-    std::size_t GetSupportedNPadIdTypesSize() const;
+    std::size_t GetSupportedNpadIdTypesSize() const;
 
     void SetHoldType(NpadHoldType joy_hold_type);
     NpadHoldType GetHoldType() const;
 
-    void SetNpadMode(u32 npad_id, NPadAssignments assignment_mode);
+    void SetNpadHandheldActivationMode(NpadHandheldActivationMode activation_mode);
+    NpadHandheldActivationMode GetNpadHandheldActivationMode() const;
 
-    void VibrateController(const std::vector<u32>& controller_ids,
-                           const std::vector<Vibration>& vibrations);
+    void SetNpadCommunicationMode(NpadCommunicationMode communication_mode_);
+    NpadCommunicationMode GetNpadCommunicationMode() const;
 
-    Kernel::SharedPtr<Kernel::ReadableEvent> GetStyleSetChangedEvent() const;
-    Vibration GetLastVibration() const;
+    void SetNpadMode(u32 npad_id, NpadAssignments assignment_mode);
 
-    void AddNewController(NPadControllerType controller);
-    void AddNewControllerAt(NPadControllerType controller, u32 npad_id);
+    bool VibrateControllerAtIndex(std::size_t npad_index, std::size_t device_index,
+                                  const VibrationValue& vibration_value);
 
-    void ConnectNPad(u32 npad_id);
-    void DisconnectNPad(u32 npad_id);
+    void VibrateController(const DeviceHandle& vibration_device_handle,
+                           const VibrationValue& vibration_value);
+
+    void VibrateControllers(const std::vector<DeviceHandle>& vibration_device_handles,
+                            const std::vector<VibrationValue>& vibration_values);
+
+    VibrationValue GetLastVibration(const DeviceHandle& vibration_device_handle) const;
+
+    void InitializeVibrationDevice(const DeviceHandle& vibration_device_handle);
+
+    void InitializeVibrationDeviceAtIndex(std::size_t npad_index, std::size_t device_index);
+
+    void SetPermitVibrationSession(bool permit_vibration_session);
+
+    bool IsVibrationDeviceMounted(const DeviceHandle& vibration_device_handle) const;
+
+    std::shared_ptr<Kernel::KReadableEvent> GetStyleSetChangedEvent(u32 npad_id) const;
+    void SignalStyleSetChangedEvent(u32 npad_id) const;
+
+    // Adds a new controller at an index.
+    void AddNewControllerAt(NPadControllerType controller, std::size_t npad_index);
+    // Adds a new controller at an index with connection status.
+    void UpdateControllerAt(NPadControllerType controller, std::size_t npad_index, bool connected);
+
+    void DisconnectNpad(u32 npad_id);
+    void DisconnectNpadAtIndex(std::size_t index);
+
+    void SetGyroscopeZeroDriftMode(GyroscopeZeroDriftMode drift_mode);
+    GyroscopeZeroDriftMode GetGyroscopeZeroDriftMode() const;
+    bool IsSixAxisSensorAtRest() const;
+    void SetSixAxisEnabled(bool six_axis_status);
+    void SetSixAxisFusionParameters(f32 parameter1, f32 parameter2);
+    std::pair<f32, f32> GetSixAxisFusionParameters();
+    void ResetSixAxisFusionParameters();
     LedPattern GetLedPattern(u32 npad_id);
-    void SetVibrationEnabled(bool can_vibrate);
-    bool IsVibrationEnabled() const;
+    bool IsUnintendedHomeButtonInputProtectionEnabled(u32 npad_id) const;
+    void SetUnintendedHomeButtonInputProtectionEnabled(bool is_protection_enabled, u32 npad_id);
     void ClearAllConnectedControllers();
     void DisconnectAllConnectedControllers();
     void ConnectAllDisconnectedControllers();
     void ClearAllControllers();
 
+    void MergeSingleJoyAsDualJoy(u32 npad_id_1, u32 npad_id_2);
     void StartLRAssignmentMode();
     void StopLRAssignmentMode();
     bool SwapNpadAssignment(u32 npad_id_1, u32 npad_id_2);
@@ -133,8 +233,12 @@ public:
     // Specifically for cheat engine and other features.
     u32 GetAndResetPressState();
 
+    static Controller_NPad::NPadControllerType MapSettingsTypeToNPad(Settings::ControllerType type);
+    static Settings::ControllerType MapNPadToSettingsType(Controller_NPad::NPadControllerType type);
     static std::size_t NPadIdToIndex(u32 npad_id);
     static u32 IndexToNPad(std::size_t index);
+    static bool IsNpadIdValid(u32 npad_id);
+    static bool IsDeviceHandleValid(const DeviceHandle& device_handle);
 
 private:
     struct CommonHeader {
@@ -145,11 +249,31 @@ private:
     };
     static_assert(sizeof(CommonHeader) == 0x20, "CommonHeader is an invalid size");
 
+    enum class ColorAttributes : u32_le {
+        Ok = 0,
+        ReadError = 1,
+        NoController = 2,
+    };
+    static_assert(sizeof(ColorAttributes) == 4, "ColorAttributes is an invalid size");
+
     struct ControllerColor {
-        u32_le body_color;
-        u32_le button_color;
+        u32_le body;
+        u32_le button;
     };
     static_assert(sizeof(ControllerColor) == 8, "ControllerColor is an invalid size");
+
+    struct FullKeyColor {
+        ColorAttributes attribute;
+        ControllerColor fullkey;
+    };
+    static_assert(sizeof(FullKeyColor) == 0xC, "FullKeyColor is an invalid size");
+
+    struct JoyconColor {
+        ColorAttributes attribute;
+        ControllerColor left;
+        ControllerColor right;
+    };
+    static_assert(sizeof(JoyconColor) == 0x14, "JoyconColor is an invalid size");
 
     struct ControllerPadState {
         union {
@@ -192,6 +316,9 @@ private:
 
             BitField<26, 1, u64> right_sl;
             BitField<27, 1, u64> right_sr;
+
+            BitField<28, 1, u64> palma;
+            BitField<30, 1, u64> handheld_left_b;
         };
     };
     static_assert(sizeof(ControllerPadState) == 8, "ControllerPadState is an invalid size");
@@ -205,12 +332,12 @@ private:
     struct ConnectionState {
         union {
             u32_le raw{};
-            BitField<0, 1, u32> IsConnected;
-            BitField<1, 1, u32> IsWired;
-            BitField<2, 1, u32> IsLeftJoyConnected;
-            BitField<3, 1, u32> IsLeftJoyWired;
-            BitField<4, 1, u32> IsRightJoyConnected;
-            BitField<5, 1, u32> IsRightJoyWired;
+            BitField<0, 1, u32> is_connected;
+            BitField<1, 1, u32> is_wired;
+            BitField<2, 1, u32> is_left_connected;
+            BitField<3, 1, u32> is_left_wired;
+            BitField<4, 1, u32> is_right_connected;
+            BitField<5, 1, u32> is_right_wired;
         };
     };
     static_assert(sizeof(ConnectionState) == 4, "ConnectionState is an invalid size");
@@ -236,63 +363,176 @@ private:
     };
     static_assert(sizeof(NPadGeneric) == 0x350, "NPadGeneric is an invalid size");
 
-    enum class ColorReadError : u32_le {
-        ReadOk = 0,
-        ColorDoesntExist = 1,
-        NoController = 2,
+    struct SixAxisAttributes {
+        union {
+            u32_le raw{};
+            BitField<0, 1, u32> is_connected;
+            BitField<1, 1, u32> is_interpolated;
+        };
     };
+    static_assert(sizeof(SixAxisAttributes) == 4, "SixAxisAttributes is an invalid size");
 
-    struct NPadProperties {
+    struct SixAxisStates {
+        s64_le timestamp{};
+        INSERT_PADDING_WORDS(2);
+        s64_le timestamp2{};
+        Common::Vec3f accel{};
+        Common::Vec3f gyro{};
+        Common::Vec3f rotation{};
+        std::array<Common::Vec3f, 3> orientation{};
+        SixAxisAttributes attribute;
+        INSERT_PADDING_BYTES(4); // Reserved
+    };
+    static_assert(sizeof(SixAxisStates) == 0x68, "SixAxisStates is an invalid size");
+
+    struct SixAxisGeneric {
+        CommonHeader common{};
+        std::array<SixAxisStates, 17> sixaxis{};
+    };
+    static_assert(sizeof(SixAxisGeneric) == 0x708, "SixAxisGeneric is an invalid size");
+
+    struct TriggerState {
+        s64_le timestamp{};
+        s64_le timestamp2{};
+        s32_le l_analog{};
+        s32_le r_analog{};
+    };
+    static_assert(sizeof(TriggerState) == 0x18, "TriggerState is an invalid size");
+
+    struct TriggerGeneric {
+        INSERT_PADDING_BYTES(0x4);
+        s64_le timestamp;
+        INSERT_PADDING_BYTES(0x4);
+        s64_le total_entry_count;
+        s64_le last_entry_index;
+        s64_le entry_count;
+        std::array<TriggerState, 17> trigger{};
+    };
+    static_assert(sizeof(TriggerGeneric) == 0x1C8, "TriggerGeneric is an invalid size");
+
+    struct NPadSystemProperties {
         union {
             s64_le raw{};
+            BitField<0, 1, s64> is_charging_joy_dual;
+            BitField<1, 1, s64> is_charging_joy_left;
+            BitField<2, 1, s64> is_charging_joy_right;
+            BitField<3, 1, s64> is_powered_joy_dual;
+            BitField<4, 1, s64> is_powered_joy_left;
+            BitField<5, 1, s64> is_powered_joy_right;
+            BitField<9, 1, s64> is_system_unsupported_button;
+            BitField<10, 1, s64> is_system_ext_unsupported_button;
             BitField<11, 1, s64> is_vertical;
             BitField<12, 1, s64> is_horizontal;
             BitField<13, 1, s64> use_plus;
             BitField<14, 1, s64> use_minus;
+            BitField<15, 1, s64> use_directional_buttons;
         };
     };
+    static_assert(sizeof(NPadSystemProperties) == 0x8, "NPadSystemProperties is an invalid size");
+
+    struct NPadButtonProperties {
+        union {
+            s32_le raw{};
+            BitField<0, 1, s32> is_home_button_protection_enabled;
+        };
+    };
+    static_assert(sizeof(NPadButtonProperties) == 0x4, "NPadButtonProperties is an invalid size");
 
     struct NPadDevice {
         union {
             u32_le raw{};
-            BitField<0, 1, s32> pro_controller;
-            BitField<1, 1, s32> handheld;
+            BitField<0, 1, s32> fullkey;
+            BitField<1, 1, s32> debug_pad;
             BitField<2, 1, s32> handheld_left;
             BitField<3, 1, s32> handheld_right;
             BitField<4, 1, s32> joycon_left;
             BitField<5, 1, s32> joycon_right;
-            BitField<6, 1, s32> pokeball;
+            BitField<6, 1, s32> palma;
+            BitField<7, 1, s32> lark_hvc_left;
+            BitField<8, 1, s32> lark_hvc_right;
+            BitField<9, 1, s32> lark_nes_left;
+            BitField<10, 1, s32> lark_nes_right;
+            BitField<11, 1, s32> handheld_lark_hvc_left;
+            BitField<12, 1, s32> handheld_lark_hvc_right;
+            BitField<13, 1, s32> handheld_lark_nes_left;
+            BitField<14, 1, s32> handheld_lark_nes_right;
+            BitField<15, 1, s32> lucia;
+            BitField<31, 1, s32> system;
         };
     };
 
+    struct MotionDevice {
+        Common::Vec3f accel;
+        Common::Vec3f gyro;
+        Common::Vec3f rotation;
+        std::array<Common::Vec3f, 3> orientation;
+    };
+
+    struct NfcXcdHandle {
+        INSERT_PADDING_BYTES(0x60);
+    };
+
+    struct AppletFooterUiAttributes {
+        INSERT_PADDING_BYTES(0x4);
+    };
+
+    enum class AppletFooterUiType : u8 {
+        None = 0,
+        HandheldNone = 1,
+        HandheldJoyConLeftOnly = 1,
+        HandheldJoyConRightOnly = 3,
+        HandheldJoyConLeftJoyConRight = 4,
+        JoyDual = 5,
+        JoyDualLeftOnly = 6,
+        JoyDualRightOnly = 7,
+        JoyLeftHorizontal = 8,
+        JoyLeftVertical = 9,
+        JoyRightHorizontal = 10,
+        JoyRightVertical = 11,
+        SwitchProController = 12,
+        CompatibleProController = 13,
+        CompatibleJoyCon = 14,
+        LarkHvc1 = 15,
+        LarkHvc2 = 16,
+        LarkNesLeft = 17,
+        LarkNesRight = 18,
+        Lucia = 19,
+        Verification = 20,
+    };
+
     struct NPadEntry {
-        NPadType joy_styles;
-        NPadAssignments pad_assignment;
+        NpadStyleSet style_set;
+        NpadAssignments assignment_mode;
+        FullKeyColor fullkey_color;
+        JoyconColor joycon_color;
 
-        ColorReadError single_color_error;
-        ControllerColor single_color;
-
-        ColorReadError dual_color_error;
-        ControllerColor left_color;
-        ControllerColor right_color;
-
-        NPadGeneric main_controller_states;
+        NPadGeneric fullkey_states;
         NPadGeneric handheld_states;
-        NPadGeneric dual_states;
-        NPadGeneric left_joy_states;
-        NPadGeneric right_joy_states;
-        NPadGeneric pokeball_states;
-        NPadGeneric libnx; // TODO(ogniK): Find out what this actually is, libnx seems to only be
-                           // relying on this for the time being
-        INSERT_PADDING_BYTES(
-            0x708 *
-            6); // TODO(ogniK): SixAxis states, require more information before implementation
+        NPadGeneric joy_dual_states;
+        NPadGeneric joy_left_states;
+        NPadGeneric joy_right_states;
+        NPadGeneric palma_states;
+        NPadGeneric system_ext_states;
+        SixAxisGeneric sixaxis_fullkey;
+        SixAxisGeneric sixaxis_handheld;
+        SixAxisGeneric sixaxis_dual_left;
+        SixAxisGeneric sixaxis_dual_right;
+        SixAxisGeneric sixaxis_left;
+        SixAxisGeneric sixaxis_right;
         NPadDevice device_type;
-        NPadProperties properties;
-        INSERT_PADDING_WORDS(1);
-        std::array<u32, 3> battery_level;
-        INSERT_PADDING_BYTES(0x5c);
-        INSERT_PADDING_BYTES(0xdf8);
+        INSERT_PADDING_BYTES(0x4); // reserved
+        NPadSystemProperties system_properties;
+        NPadButtonProperties button_properties;
+        u32 battery_level_dual;
+        u32 battery_level_left;
+        u32 battery_level_right;
+        AppletFooterUiAttributes footer_attributes;
+        AppletFooterUiType footer_type;
+        // nfc_states needs to be checked switchbrew does not match with HW
+        NfcXcdHandle nfc_states;
+        INSERT_PADDING_BYTES(0x8); // Mutex
+        TriggerGeneric gc_trigger_states;
+        INSERT_PADDING_BYTES(0xc1f);
     };
     static_assert(sizeof(NPadEntry) == 0x5000, "NPadEntry is an invalid size");
 
@@ -301,31 +541,50 @@ private:
         bool is_connected;
     };
 
-    u32 press_state{};
+    void InitNewlyAddedController(std::size_t controller_idx);
+    bool IsControllerSupported(NPadControllerType controller) const;
+    void RequestPadStateUpdate(u32 npad_id);
 
-    NPadType style{};
+    std::atomic<u32> press_state{};
+
+    NpadStyleSet style{};
     std::array<NPadEntry, 10> shared_memory_entries{};
-    std::array<
+    using ButtonArray = std::array<
         std::array<std::unique_ptr<Input::ButtonDevice>, Settings::NativeButton::NUM_BUTTONS_HID>,
-        10>
-        buttons;
-    std::array<
+        10>;
+    using StickArray = std::array<
         std::array<std::unique_ptr<Input::AnalogDevice>, Settings::NativeAnalog::NUM_STICKS_HID>,
-        10>
-        sticks;
+        10>;
+    using VibrationArray = std::array<std::array<std::unique_ptr<Input::VibrationDevice>,
+                                                 Settings::NativeVibration::NUM_VIBRATIONS_HID>,
+                                      10>;
+    using MotionArray = std::array<
+        std::array<std::unique_ptr<Input::MotionDevice>, Settings::NativeMotion::NUM_MOTIONS_HID>,
+        10>;
+    ButtonArray buttons;
+    StickArray sticks;
+    VibrationArray vibrations;
+    MotionArray motions;
     std::vector<u32> supported_npad_id_types{};
     NpadHoldType hold_type{NpadHoldType::Vertical};
-    Kernel::EventPair styleset_changed_event;
-    Vibration last_processed_vibration{};
+    NpadHandheldActivationMode handheld_activation_mode{NpadHandheldActivationMode::Dual};
+    NpadCommunicationMode communication_mode{NpadCommunicationMode::Default};
+    // Each controller should have their own styleset changed event
+    std::array<std::shared_ptr<Kernel::KEvent>, 10> styleset_changed_events;
+    std::array<std::array<std::chrono::steady_clock::time_point, 2>, 10> last_vibration_timepoints;
+    std::array<std::array<VibrationValue, 2>, 10> latest_vibration_values{};
+    bool permit_vibration_session_enabled{false};
+    std::array<std::array<bool, 2>, 10> vibration_devices_mounted{};
     std::array<ControllerHolder, 10> connected_controllers{};
-    bool can_controllers_vibrate{true};
-
-    void InitNewlyAddedControler(std::size_t controller_idx);
-    bool IsControllerSupported(NPadControllerType controller) const;
-    NPadControllerType DecideBestController(NPadControllerType priority) const;
-    void RequestPadStateUpdate(u32 npad_id);
+    std::array<bool, 10> unintended_home_button_input_protection{};
+    GyroscopeZeroDriftMode gyroscope_zero_drift_mode{GyroscopeZeroDriftMode::Standard};
+    bool sixaxis_sensors_enabled{true};
+    f32 sixaxis_fusion_parameter1{};
+    f32 sixaxis_fusion_parameter2{};
+    bool sixaxis_at_rest{true};
     std::array<ControllerPad, 10> npad_pad_states{};
-    bool IsControllerSupported(NPadControllerType controller);
+    std::array<TriggerState, 10> npad_trigger_states{};
     bool is_in_lr_assignment_mode{false};
+    Core::System& system;
 };
 } // namespace Service::HID

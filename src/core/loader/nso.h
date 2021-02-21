@@ -12,6 +12,10 @@
 #include "core/file_sys/patch_manager.h"
 #include "core/loader/loader.h"
 
+namespace Core {
+class System;
+}
+
 namespace Kernel {
 class Process;
 }
@@ -55,7 +59,7 @@ struct NSOHeader {
 static_assert(sizeof(NSOHeader) == 0x100, "NSOHeader has incorrect size.");
 static_assert(std::is_trivially_copyable_v<NSOHeader>, "NSOHeader must be trivially copyable.");
 
-constexpr u64 NSO_ARGUMENT_DATA_ALLOCATION_SIZE = 0x9000;
+constexpr u32 NSO_ARGUMENT_DATA_ALLOCATION_SIZE = 0x9000;
 
 struct NSOArgumentHeader {
     u32_le allocated_size;
@@ -71,7 +75,7 @@ public:
 
     /**
      * Returns the type of the file
-     * @param file std::shared_ptr<VfsFile> open file
+     * @param file open file
      * @return FileType found, or FileType::Error if this loader doesn't know it
      */
     static FileType IdentifyType(const FileSys::VirtualFile& file);
@@ -80,11 +84,12 @@ public:
         return IdentifyType(file);
     }
 
-    static std::optional<VAddr> LoadModule(Kernel::Process& process, const FileSys::VfsFile& file,
-                                           VAddr load_base, bool should_pass_arguments,
+    static std::optional<VAddr> LoadModule(Kernel::Process& process, Core::System& system,
+                                           const FileSys::VfsFile& file, VAddr load_base,
+                                           bool should_pass_arguments, bool load_into_process,
                                            std::optional<FileSys::PatchManager> pm = {});
 
-    LoadResult Load(Kernel::Process& process) override;
+    LoadResult Load(Kernel::Process& process, Core::System& system) override;
 
     ResultStatus ReadNSOModules(Modules& modules) override;
 

@@ -7,6 +7,10 @@
 #include <memory>
 #include <QWidget>
 
+namespace ConfigurationShared {
+enum class CheckState;
+}
+
 class HotkeyRegistry;
 
 namespace Ui {
@@ -28,5 +32,10 @@ private:
 
     void SetConfiguration();
 
+    void SetupPerGameUI();
+
     std::unique_ptr<Ui::ConfigureGeneral> ui;
+
+    ConfigurationShared::CheckState use_frame_limit;
+    ConfigurationShared::CheckState use_multi_core;
 };

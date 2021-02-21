@@ -5,6 +5,7 @@
 #include <QHash>
 #include <QListWidgetItem>
 #include <QSignalBlocker>
+#include "core/core.h"
 #include "core/settings.h"
 #include "ui_configure.h"
 #include "yuzu/configuration/config.h"
@@ -12,15 +13,21 @@
 #include "yuzu/configuration/configure_input_player.h"
 #include "yuzu/hotkeys.h"
 
-ConfigureDialog::ConfigureDialog(QWidget* parent, HotkeyRegistry& registry)
+ConfigureDialog::ConfigureDialog(QWidget* parent, HotkeyRegistry& registry,
+                                 InputCommon::InputSubsystem* input_subsystem)
     : QDialog(parent), ui(new Ui::ConfigureDialog), registry(registry) {
+    Settings::SetConfiguringGlobal(true);
+
     ui->setupUi(this);
     ui->hotkeysTab->Populate(registry);
     setWindowFlags(windowFlags() & ~Qt::WindowContextHelpButtonHint);
 
+    ui->inputTab->Initialize(input_subsystem);
+
     SetConfiguration();
     PopulateSelectionList();
 
+    connect(ui->uiTab, &ConfigureUi::LanguageChanged, this, &ConfigureDialog::OnLanguageChanged);
     connect(ui->selectorList, &QListWidget::itemSelectionChanged, this,
             &ConfigureDialog::UpdateVisibleTabs);
 
@@ -34,16 +41,21 @@ void ConfigureDialog::SetConfiguration() {}
 
 void ConfigureDialog::ApplyConfiguration() {
     ui->generalTab->ApplyConfiguration();
-    ui->gameListTab->ApplyConfiguration();
+    ui->uiTab->ApplyConfiguration();
     ui->systemTab->ApplyConfiguration();
     ui->profileManagerTab->ApplyConfiguration();
+    ui->filesystemTab->applyConfiguration();
     ui->inputTab->ApplyConfiguration();
     ui->hotkeysTab->ApplyConfiguration(registry);
+    ui->cpuTab->ApplyConfiguration();
+    ui->cpuDebugTab->ApplyConfiguration();
     ui->graphicsTab->ApplyConfiguration();
+    ui->graphicsAdvancedTab->ApplyConfiguration();
     ui->audioTab->ApplyConfiguration();
     ui->debugTab->ApplyConfiguration();
     ui->webTab->ApplyConfiguration();
-    Settings::Apply();
+    ui->serviceTab->ApplyConfiguration();
+    Settings::Apply(Core::System::GetInstance());
     Settings::LogSettings();
 }
 
@@ -71,11 +83,13 @@ void ConfigureDialog::RetranslateUI() {
 Q_DECLARE_METATYPE(QList<QWidget*>);
 
 void ConfigureDialog::PopulateSelectionList() {
-    const std::array<std::pair<QString, QList<QWidget*>>, 4> items{
-        {{tr("General"), {ui->generalTab, ui->webTab, ui->debugTab, ui->gameListTab}},
-         {tr("System"), {ui->systemTab, ui->profileManagerTab, ui->audioTab}},
-         {tr("Graphics"), {ui->graphicsTab}},
-         {tr("Controls"), {ui->inputTab, ui->hotkeysTab}}},
+    const std::array<std::pair<QString, QList<QWidget*>>, 6> items{
+        {{tr("General"), {ui->generalTab, ui->hotkeysTab, ui->uiTab, ui->webTab, ui->debugTab}},
+         {tr("System"), {ui->systemTab, ui->profileManagerTab, ui->serviceTab, ui->filesystemTab}},
+         {tr("CPU"), {ui->cpuTab, ui->cpuDebugTab}},
+         {tr("Graphics"), {ui->graphicsTab, ui->graphicsAdvancedTab}},
+         {tr("Audio"), {ui->audioTab}},
+         {tr("Controls"), ui->inputTab->GetSubTabs()}},
     };
 
     [[maybe_unused]] const QSignalBlocker blocker(ui->selectorList);
@@ -89,32 +103,27 @@ void ConfigureDialog::PopulateSelectionList() {
     }
 }
 
+void ConfigureDialog::OnLanguageChanged(const QString& locale) {
+    emit LanguageChanged(locale);
+    // first apply the configuration, and then restore the display
+    ApplyConfiguration();
+    RetranslateUI();
+    SetConfiguration();
+}
+
 void ConfigureDialog::UpdateVisibleTabs() {
     const auto items = ui->selectorList->selectedItems();
     if (items.isEmpty()) {
         return;
     }
 
-    const std::map<QWidget*, QString> widgets = {
-        {ui->generalTab, tr("General")},
-        {ui->systemTab, tr("System")},
-        {ui->profileManagerTab, tr("Profiles")},
-        {ui->inputTab, tr("Input")},
-        {ui->hotkeysTab, tr("Hotkeys")},
-        {ui->graphicsTab, tr("Graphics")},
-        {ui->audioTab, tr("Audio")},
-        {ui->debugTab, tr("Debug")},
-        {ui->webTab, tr("Web")},
-        {ui->gameListTab, tr("Game List")},
-    };
-
     [[maybe_unused]] const QSignalBlocker blocker(ui->tabWidget);
 
     ui->tabWidget->clear();
 
-    const QList<QWidget*> tabs = qvariant_cast<QList<QWidget*>>(items[0]->data(Qt::UserRole));
+    const auto tabs = qvariant_cast<QList<QWidget*>>(items[0]->data(Qt::UserRole));
 
-    for (const auto tab : tabs) {
-        ui->tabWidget->addTab(tab, widgets.at(tab));
+    for (auto* const tab : tabs) {
+        ui->tabWidget->addTab(tab, tab->accessibleName());
     }
 }

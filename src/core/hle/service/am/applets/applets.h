@@ -6,9 +6,9 @@
 
 #include <memory>
 #include <queue>
+
 #include "common/swap.h"
 #include "core/hle/kernel/object.h"
-#include "core/hle/kernel/writable_event.h"
 
 union ResultCode;
 
@@ -17,6 +17,7 @@ class System;
 }
 
 namespace Core::Frontend {
+class ControllerApplet;
 class ECommerceApplet;
 class ErrorApplet;
 class ParentalControlsApplet;
@@ -28,7 +29,9 @@ class WebBrowserApplet;
 
 namespace Kernel {
 class KernelCore;
-}
+class KEvent;
+class KReadableEvent;
+} // namespace Kernel
 
 namespace Service::AM {
 
@@ -49,13 +52,13 @@ enum class AppletId : u32 {
     ProfileSelect = 0x10,
     SoftwareKeyboard = 0x11,
     MiiEdit = 0x12,
-    LibAppletWeb = 0x13,
-    LibAppletShop = 0x14,
+    Web = 0x13,
+    Shop = 0x14,
     PhotoViewer = 0x15,
     Settings = 0x16,
-    LibAppletOff = 0x17,
-    LibAppletWhitelisted = 0x18,
-    LibAppletAuth = 0x19,
+    OfflineWeb = 0x17,
+    LoginShare = 0x18,
+    WebAuth = 0x19,
     MyPage = 0x1A,
 };
 
@@ -72,46 +75,46 @@ public:
     // Retrieves but does not pop the data sent to applet.
     RawChannelData PeekDataToAppletForDebug() const;
 
-    std::unique_ptr<IStorage> PopNormalDataToGame();
-    std::unique_ptr<IStorage> PopNormalDataToApplet();
+    std::shared_ptr<IStorage> PopNormalDataToGame();
+    std::shared_ptr<IStorage> PopNormalDataToApplet();
 
-    std::unique_ptr<IStorage> PopInteractiveDataToGame();
-    std::unique_ptr<IStorage> PopInteractiveDataToApplet();
+    std::shared_ptr<IStorage> PopInteractiveDataToGame();
+    std::shared_ptr<IStorage> PopInteractiveDataToApplet();
 
-    void PushNormalDataFromGame(IStorage storage);
-    void PushNormalDataFromApplet(IStorage storage);
+    void PushNormalDataFromGame(std::shared_ptr<IStorage>&& storage);
+    void PushNormalDataFromApplet(std::shared_ptr<IStorage>&& storage);
 
-    void PushInteractiveDataFromGame(IStorage storage);
-    void PushInteractiveDataFromApplet(IStorage storage);
+    void PushInteractiveDataFromGame(std::shared_ptr<IStorage>&& storage);
+    void PushInteractiveDataFromApplet(std::shared_ptr<IStorage>&& storage);
 
     void SignalStateChanged() const;
 
-    Kernel::SharedPtr<Kernel::ReadableEvent> GetNormalDataEvent() const;
-    Kernel::SharedPtr<Kernel::ReadableEvent> GetInteractiveDataEvent() const;
-    Kernel::SharedPtr<Kernel::ReadableEvent> GetStateChangedEvent() const;
+    std::shared_ptr<Kernel::KReadableEvent> GetNormalDataEvent() const;
+    std::shared_ptr<Kernel::KReadableEvent> GetInteractiveDataEvent() const;
+    std::shared_ptr<Kernel::KReadableEvent> GetStateChangedEvent() const;
 
 private:
     // Queues are named from applet's perspective
 
     // PopNormalDataToApplet and PushNormalDataFromGame
-    std::deque<std::unique_ptr<IStorage>> in_channel;
+    std::deque<std::shared_ptr<IStorage>> in_channel;
 
     // PopNormalDataToGame and PushNormalDataFromApplet
-    std::deque<std::unique_ptr<IStorage>> out_channel;
+    std::deque<std::shared_ptr<IStorage>> out_channel;
 
     // PopInteractiveDataToApplet and PushInteractiveDataFromGame
-    std::deque<std::unique_ptr<IStorage>> in_interactive_channel;
+    std::deque<std::shared_ptr<IStorage>> in_interactive_channel;
 
     // PopInteractiveDataToGame and PushInteractiveDataFromApplet
-    std::deque<std::unique_ptr<IStorage>> out_interactive_channel;
+    std::deque<std::shared_ptr<IStorage>> out_interactive_channel;
 
-    Kernel::EventPair state_changed_event;
+    std::shared_ptr<Kernel::KEvent> state_changed_event;
 
     // Signaled on PushNormalDataFromApplet
-    Kernel::EventPair pop_out_data_event;
+    std::shared_ptr<Kernel::KEvent> pop_out_data_event;
 
     // Signaled on PushInteractiveDataFromApplet
-    Kernel::EventPair pop_interactive_out_data_event;
+    std::shared_ptr<Kernel::KEvent> pop_interactive_out_data_event;
 };
 
 class Applet {
@@ -155,19 +158,19 @@ protected:
 };
 
 struct AppletFrontendSet {
-    using ParentalControlsApplet = std::unique_ptr<Core::Frontend::ParentalControlsApplet>;
+    using ControllerApplet = std::unique_ptr<Core::Frontend::ControllerApplet>;
     using ErrorApplet = std::unique_ptr<Core::Frontend::ErrorApplet>;
+    using ParentalControlsApplet = std::unique_ptr<Core::Frontend::ParentalControlsApplet>;
     using PhotoViewer = std::unique_ptr<Core::Frontend::PhotoViewerApplet>;
     using ProfileSelect = std::unique_ptr<Core::Frontend::ProfileSelectApplet>;
     using SoftwareKeyboard = std::unique_ptr<Core::Frontend::SoftwareKeyboardApplet>;
     using WebBrowser = std::unique_ptr<Core::Frontend::WebBrowserApplet>;
-    using ECommerceApplet = std::unique_ptr<Core::Frontend::ECommerceApplet>;
 
     AppletFrontendSet();
-    AppletFrontendSet(ParentalControlsApplet parental_controls, ErrorApplet error,
-                      PhotoViewer photo_viewer, ProfileSelect profile_select,
-                      SoftwareKeyboard software_keyboard, WebBrowser web_browser,
-                      ECommerceApplet e_commerce);
+    AppletFrontendSet(ControllerApplet controller_applet, ErrorApplet error_applet,
+                      ParentalControlsApplet parental_controls_applet, PhotoViewer photo_viewer_,
+                      ProfileSelect profile_select_, SoftwareKeyboard software_keyboard_,
+                      WebBrowser web_browser_);
     ~AppletFrontendSet();
 
     AppletFrontendSet(const AppletFrontendSet&) = delete;
@@ -176,19 +179,21 @@ struct AppletFrontendSet {
     AppletFrontendSet(AppletFrontendSet&&) noexcept;
     AppletFrontendSet& operator=(AppletFrontendSet&&) noexcept;
 
-    ParentalControlsApplet parental_controls;
+    ControllerApplet controller;
     ErrorApplet error;
+    ParentalControlsApplet parental_controls;
     PhotoViewer photo_viewer;
     ProfileSelect profile_select;
     SoftwareKeyboard software_keyboard;
     WebBrowser web_browser;
-    ECommerceApplet e_commerce;
 };
 
 class AppletManager {
 public:
     explicit AppletManager(Core::System& system_);
     ~AppletManager();
+
+    const AppletFrontendSet& GetAppletFrontendSet() const;
 
     void SetAppletFrontendSet(AppletFrontendSet set);
     void SetDefaultAppletFrontendSet();

@@ -32,7 +32,6 @@ if (MSVC)
     # /Zc:inline          - Let codegen omit inline functions in object files
     # /Zc:throwingNew     - Let codegen assume `operator new` (without std::nothrow) will never return null
     add_compile_options(
-        /W3
         /MP
         /Zi
         /Zo
@@ -43,6 +42,18 @@ if (MSVC)
         /Zc:externConstexpr
         /Zc:inline
         /Zc:throwingNew
+
+        # Warnings
+        /W3
+        /we4062 # enumerator 'identifier' in a switch of enum 'enumeration' is not handled
+        /we4101 # 'identifier': unreferenced local variable
+        /we4265 # 'class': class has virtual functions, but destructor is not virtual
+        /we4388 # signed/unsigned mismatch
+        /we4547 # 'operator' : operator before comma has no effect; expected operator with side-effect
+        /we4549 # 'operator1': operator before comma has no effect; did you intend 'operator2'?
+        /we4555 # Expression has no effect; expected expression with side-effect
+        /we4834 # Discarding return value of function with 'nodiscard' attribute
+        /we5038 # data member 'member1' will be initialized after data member 'member2'
     )
 
     # /GS- - No stack buffer overflow checks
@@ -53,8 +64,32 @@ if (MSVC)
 else()
     add_compile_options(
         -Wall
+        -Werror=array-bounds
+        -Werror=implicit-fallthrough
+        -Werror=missing-declarations
+        -Werror=missing-field-initializers
+        -Werror=reorder
+        -Werror=switch
+        -Werror=uninitialized
+        -Werror=unused-function
+        -Werror=unused-result
+        -Werror=unused-variable
+        -Wextra
+        -Wmissing-declarations
         -Wno-attributes
+        -Wno-invalid-offsetof
+        -Wno-unused-parameter
     )
+
+    # TODO: Remove when we update to a GCC compiler that enables this
+    #       by default (i.e. GCC 10 or newer).
+    if (CMAKE_CXX_COMPILER_ID STREQUAL GNU)
+        add_compile_options(-fconcepts)
+    endif()
+
+    if (ARCHITECTURE_x86_64)
+        add_compile_options("-mcx16")
+    endif()
 
     if (APPLE AND CMAKE_CXX_COMPILER_ID STREQUAL Clang)
         add_compile_options("-stdlib=libc++")
@@ -77,6 +112,15 @@ else()
             add_compile_options("-static")
         endif()
     endif()
+
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR MINGW)
+        # GNU ar: Create thin archive files.
+        # Requires binutils-2.19 or later.
+        set(CMAKE_C_ARCHIVE_CREATE   "<CMAKE_AR> qcTP <TARGET> <LINK_FLAGS> <OBJECTS>")
+        set(CMAKE_C_ARCHIVE_APPEND   "<CMAKE_AR> qTP  <TARGET> <LINK_FLAGS> <OBJECTS>")
+        set(CMAKE_CXX_ARCHIVE_CREATE "<CMAKE_AR> qcTP <TARGET> <LINK_FLAGS> <OBJECTS>")
+        set(CMAKE_CXX_ARCHIVE_APPEND "<CMAKE_AR> qTP  <TARGET> <LINK_FLAGS> <OBJECTS>")
+    endif()
 endif()
 
 add_subdirectory(common)
@@ -88,7 +132,6 @@ add_subdirectory(tests)
 
 if (ENABLE_SDL2)
     add_subdirectory(yuzu_cmd)
-    add_subdirectory(yuzu_tester)
 endif()
 
 if (ENABLE_QT)

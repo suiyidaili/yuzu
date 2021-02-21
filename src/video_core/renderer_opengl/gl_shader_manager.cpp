@@ -2,65 +2,148 @@
 // Licensed under GPLv2 or any later version
 // Refer to the license.txt file included.
 
+#include <glad/glad.h>
+
 #include "common/common_types.h"
 #include "video_core/engines/maxwell_3d.h"
+#include "video_core/renderer_opengl/gl_device.h"
 #include "video_core/renderer_opengl/gl_shader_manager.h"
 
-namespace OpenGL::GLShader {
+namespace OpenGL {
 
-using Tegra::Engines::Maxwell3D;
+namespace {
 
-ProgramManager::ProgramManager() {
-    pipeline.Create();
+void BindProgram(GLenum stage, GLuint current, GLuint old, bool& enabled) {
+    if (current == old) {
+        return;
+    }
+    if (current == 0) {
+        if (enabled) {
+            enabled = false;
+            glDisable(stage);
+        }
+        return;
+    }
+    if (!enabled) {
+        enabled = true;
+        glEnable(stage);
+    }
+    glBindProgramARB(stage, current);
+}
+
+} // Anonymous namespace
+
+ProgramManager::ProgramManager(const Device& device)
+    : use_assembly_programs{device.UseAssemblyShaders()} {
+    if (use_assembly_programs) {
+        glEnable(GL_COMPUTE_PROGRAM_NV);
+    } else {
+        graphics_pipeline.Create();
+        glBindProgramPipeline(graphics_pipeline.handle);
+    }
 }
 
 ProgramManager::~ProgramManager() = default;
 
-void ProgramManager::ApplyTo(OpenGLState& state) {
-    UpdatePipeline();
-    state.draw.shader_program = 0;
-    state.draw.program_pipeline = pipeline.handle;
+void ProgramManager::BindCompute(GLuint program) {
+    if (use_assembly_programs) {
+        glBindProgramARB(GL_COMPUTE_PROGRAM_NV, program);
+    } else {
+        is_graphics_bound = false;
+        glUseProgram(program);
+    }
 }
 
-void ProgramManager::UpdatePipeline() {
-    // Avoid updating the pipeline when values have no changed
-    if (old_state == current_state) {
-        return;
+void ProgramManager::BindGraphicsPipeline() {
+    if (!use_assembly_programs) {
+        UpdateSourcePrograms();
+    }
+}
+
+void ProgramManager::BindHostPipeline(GLuint pipeline) {
+    if (use_assembly_programs) {
+        if (geometry_enabled) {
+            geometry_enabled = false;
+            old_state.geometry = 0;
+            glDisable(GL_GEOMETRY_PROGRAM_NV);
+        }
+    } else {
+        if (!is_graphics_bound) {
+            glUseProgram(0);
+        }
+    }
+    glBindProgramPipeline(pipeline);
+}
+
+void ProgramManager::RestoreGuestPipeline() {
+    if (use_assembly_programs) {
+        glBindProgramPipeline(0);
+    } else {
+        glBindProgramPipeline(graphics_pipeline.handle);
+    }
+}
+
+void ProgramManager::BindHostCompute(GLuint program) {
+    if (use_assembly_programs) {
+        glDisable(GL_COMPUTE_PROGRAM_NV);
+    }
+    glUseProgram(program);
+    is_graphics_bound = false;
+}
+
+void ProgramManager::RestoreGuestCompute() {
+    if (use_assembly_programs) {
+        glEnable(GL_COMPUTE_PROGRAM_NV);
+        glUseProgram(0);
+    }
+}
+
+void ProgramManager::UseVertexShader(GLuint program) {
+    if (use_assembly_programs) {
+        BindProgram(GL_VERTEX_PROGRAM_NV, program, current_state.vertex, vertex_enabled);
+    }
+    current_state.vertex = program;
+}
+
+void ProgramManager::UseGeometryShader(GLuint program) {
+    if (use_assembly_programs) {
+        BindProgram(GL_GEOMETRY_PROGRAM_NV, program, current_state.vertex, geometry_enabled);
+    }
+    current_state.geometry = program;
+}
+
+void ProgramManager::UseFragmentShader(GLuint program) {
+    if (use_assembly_programs) {
+        BindProgram(GL_FRAGMENT_PROGRAM_NV, program, current_state.vertex, fragment_enabled);
+    }
+    current_state.fragment = program;
+}
+
+void ProgramManager::UpdateSourcePrograms() {
+    if (!is_graphics_bound) {
+        is_graphics_bound = true;
+        glUseProgram(0);
     }
 
-    // Workaround for AMD bug
-    constexpr GLenum all_used_stages{GL_VERTEX_SHADER_BIT | GL_GEOMETRY_SHADER_BIT |
-                                     GL_FRAGMENT_SHADER_BIT};
-    glUseProgramStages(pipeline.handle, all_used_stages, 0);
-
-    glUseProgramStages(pipeline.handle, GL_VERTEX_SHADER_BIT, current_state.vertex_shader);
-    glUseProgramStages(pipeline.handle, GL_GEOMETRY_SHADER_BIT, current_state.geometry_shader);
-    glUseProgramStages(pipeline.handle, GL_FRAGMENT_SHADER_BIT, current_state.fragment_shader);
+    const GLuint handle = graphics_pipeline.handle;
+    const auto update_state = [handle](GLenum stage, GLuint current, GLuint old) {
+        if (current == old) {
+            return;
+        }
+        glUseProgramStages(handle, stage, current);
+    };
+    update_state(GL_VERTEX_SHADER_BIT, current_state.vertex, old_state.vertex);
+    update_state(GL_GEOMETRY_SHADER_BIT, current_state.geometry, old_state.geometry);
+    update_state(GL_FRAGMENT_SHADER_BIT, current_state.fragment, old_state.fragment);
 
     old_state = current_state;
 }
 
-void MaxwellUniformData::SetFromRegs(const Maxwell3D& maxwell, std::size_t shader_stage) {
+void MaxwellUniformData::SetFromRegs(const Tegra::Engines::Maxwell3D& maxwell) {
     const auto& regs = maxwell.regs;
-    const auto& state = maxwell.state;
-
-    // TODO(bunnei): Support more than one viewport
-    viewport_flip[0] = regs.viewport_transform[0].scale_x < 0.0 ? -1.0f : 1.0f;
-    viewport_flip[1] = regs.viewport_transform[0].scale_y < 0.0 ? -1.0f : 1.0f;
-
-    instance_id = state.current_instance;
-
-    // Assign in which stage the position has to be flipped
-    // (the last stage before the fragment shader).
-    constexpr u32 geometry_index = static_cast<u32>(Maxwell3D::Regs::ShaderProgram::Geometry);
-    if (maxwell.regs.shader_config[geometry_index].enable) {
-        flip_stage = geometry_index;
-    } else {
-        flip_stage = static_cast<u32>(Maxwell3D::Regs::ShaderProgram::VertexB);
-    }
 
     // Y_NEGATE controls what value S2R returns for the Y_DIRECTION system value.
-    y_direction = regs.screen_y_control.y_negate == 0 ? 1.f : -1.f;
+    y_direction = regs.screen_y_control.y_negate == 0 ? 1.0f : -1.0f;
 }
 
-} // namespace OpenGL::GLShader
+} // namespace OpenGL

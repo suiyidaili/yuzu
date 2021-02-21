@@ -119,7 +119,7 @@ union ResultCode {
     BitField<0, 9, ErrorModule> module;
     BitField<9, 13, u32> description;
 
-    constexpr explicit ResultCode(u32 raw) : raw(raw) {}
+    constexpr explicit ResultCode(u32 raw_) : raw(raw_) {}
 
     constexpr ResultCode(ErrorModule module_, u32 description_)
         : raw(module.FormatValue(module_) | description.FormatValue(description_)) {}
@@ -145,6 +145,14 @@ constexpr bool operator!=(const ResultCode& a, const ResultCode& b) {
 
 /// The default success `ResultCode`.
 constexpr ResultCode RESULT_SUCCESS(0);
+
+/**
+ * Placeholder result code used for unknown error codes.
+ *
+ * @note This should only be used when a particular error code
+ *       is not known yet.
+ */
+constexpr ResultCode RESULT_UNKNOWN(UINT32_MAX);
 
 /**
  * This is an optional value type. It holds a `ResultCode` and, if that code is a success code,
@@ -183,7 +191,7 @@ class ResultVal {
 public:
     /// Constructs an empty `ResultVal` with the given error code. The code must not be a success
     /// code.
-    ResultVal(ResultCode error_code = ResultCode(-1)) : result_code(error_code) {
+    ResultVal(ResultCode error_code = RESULT_UNKNOWN) : result_code(error_code) {
         ASSERT(error_code.IsError());
     }
 
@@ -334,8 +342,9 @@ ResultVal<std::remove_reference_t<Arg>> MakeResult(Arg&& arg) {
  */
 #define CASCADE_RESULT(target, source)                                                             \
     auto CONCAT2(check_result_L, __LINE__) = source;                                               \
-    if (CONCAT2(check_result_L, __LINE__).Failed())                                                \
+    if (CONCAT2(check_result_L, __LINE__).Failed()) {                                              \
         return CONCAT2(check_result_L, __LINE__).Code();                                           \
+    }                                                                                              \
     target = std::move(*CONCAT2(check_result_L, __LINE__))
 
 /**
@@ -343,6 +352,9 @@ ResultVal<std::remove_reference_t<Arg>> MakeResult(Arg&& arg) {
  * non-success, or discarded otherwise.
  */
 #define CASCADE_CODE(source)                                                                       \
-    auto CONCAT2(check_result_L, __LINE__) = source;                                               \
-    if (CONCAT2(check_result_L, __LINE__).IsError())                                               \
-        return CONCAT2(check_result_L, __LINE__);
+    do {                                                                                           \
+        auto CONCAT2(check_result_L, __LINE__) = source;                                           \
+        if (CONCAT2(check_result_L, __LINE__).IsError()) {                                         \
+            return CONCAT2(check_result_L, __LINE__);                                              \
+        }                                                                                          \
+    } while (false)

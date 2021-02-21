@@ -2,7 +2,10 @@
 // Licensed under GPLv2 or any later version
 // Refer to the license.txt file included.
 
+#include <memory>
+
 #include "common/common_types.h"
+#include "common/string_util.h"
 #include "common/swap.h"
 #include "core/file_sys/fsmitm_romfsbuild.h"
 #include "core/file_sys/romfs.h"
@@ -12,7 +15,7 @@
 #include "core/file_sys/vfs_vector.h"
 
 namespace FileSys {
-
+namespace {
 constexpr u32 ROMFS_ENTRY_EMPTY = 0xFFFFFFFF;
 
 struct TableLocation {
@@ -51,7 +54,7 @@ struct FileEntry {
 static_assert(sizeof(FileEntry) == 0x20, "FileEntry has incorrect size.");
 
 template <typename Entry>
-static std::pair<Entry, std::string> GetEntry(const VirtualFile& file, std::size_t offset) {
+std::pair<Entry, std::string> GetEntry(const VirtualFile& file, std::size_t offset) {
     Entry entry{};
     if (file->ReadObject(&entry, offset) != sizeof(Entry))
         return {};
@@ -99,6 +102,7 @@ void ProcessDirectory(VirtualFile file, std::size_t dir_offset, std::size_t file
         this_dir_offset = entry.first.sibling;
     }
 }
+} // Anonymous namespace
 
 VirtualDir ExtractRomFS(VirtualFile file, RomFSExtractionType type) {
     RomFSHeader header{};
@@ -123,7 +127,7 @@ VirtualDir ExtractRomFS(VirtualFile file, RomFSExtractionType type) {
         return out->GetSubdirectories().front();
 
     while (out->GetSubdirectories().size() == 1 && out->GetFiles().empty()) {
-        if (out->GetSubdirectories().front()->GetName() == "data" &&
+        if (Common::ToLower(out->GetSubdirectories().front()->GetName()) == "data" &&
             type == RomFSExtractionType::Truncated)
             break;
         out = out->GetSubdirectories().front();

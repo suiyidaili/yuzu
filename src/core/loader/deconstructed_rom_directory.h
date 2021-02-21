@@ -9,6 +9,10 @@
 #include "core/file_sys/program_metadata.h"
 #include "core/loader/loader.h"
 
+namespace Core {
+class System;
+}
+
 namespace Loader {
 
 /**
@@ -28,7 +32,7 @@ public:
 
     /**
      * Returns the type of the file
-     * @param file std::shared_ptr<VfsFile> open file
+     * @param file open file
      * @return FileType found, or FileType::Error if this loader doesn't know it
      */
     static FileType IdentifyType(const FileSys::VirtualFile& file);
@@ -37,7 +41,7 @@ public:
         return IdentifyType(file);
     }
 
-    LoadResult Load(Kernel::Process& process) override;
+    LoadResult Load(Kernel::Process& process, Core::System& system) override;
 
     ResultStatus ReadRomFS(FileSys::VirtualFile& dir) override;
     ResultStatus ReadIcon(std::vector<u8>& buffer) override;

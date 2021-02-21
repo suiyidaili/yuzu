@@ -5,9 +5,11 @@
 #include <queue>
 #include "common/logging/log.h"
 #include "common/uuid.h"
+#include "core/core.h"
 #include "core/hle/ipc_helpers.h"
-#include "core/hle/kernel/readable_event.h"
-#include "core/hle/kernel/writable_event.h"
+#include "core/hle/kernel/k_event.h"
+#include "core/hle/kernel/k_readable_event.h"
+#include "core/hle/kernel/k_writable_event.h"
 #include "core/hle/service/friend/errors.h"
 #include "core/hle/service/friend/friend.h"
 #include "core/hle/service/friend/interface.h"
@@ -16,7 +18,7 @@ namespace Service::Friend {
 
 class IFriendService final : public ServiceFramework<IFriendService> {
 public:
-    IFriendService() : ServiceFramework("IFriendService") {
+    explicit IFriendService(Core::System& system_) : ServiceFramework{system_, "IFriendService"} {
         // clang-format off
         static const FunctionInfo functions[] = {
             {0, nullptr, "GetCompletionEvent"},
@@ -25,9 +27,13 @@ public:
             {10101, &IFriendService::GetFriendList, "GetFriendList"},
             {10102, nullptr, "UpdateFriendInfo"},
             {10110, nullptr, "GetFriendProfileImage"},
+            {10120, nullptr, "Unknown10120"},
+            {10121, nullptr, "Unknown10121"},
             {10200, nullptr, "SendFriendRequestForApplication"},
             {10211, nullptr, "AddFacedFriendRequestForApplication"},
-            {10400, nullptr, "GetBlockedUserListIds"},
+            {10400, &IFriendService::GetBlockedUserListIds, "GetBlockedUserListIds"},
+            {10420, nullptr, "Unknown10420"},
+            {10421, nullptr, "Unknown10421"},
             {10500, nullptr, "GetProfileList"},
             {10600, nullptr, "DeclareOpenOnlinePlaySession"},
             {10601, &IFriendService::DeclareCloseOnlinePlaySession, "DeclareCloseOnlinePlaySession"},
@@ -60,6 +66,9 @@ public:
             {20801, nullptr, "SyncUserSetting"},
             {20900, nullptr, "RequestListSummaryOverlayNotification"},
             {21000, nullptr, "GetExternalApplicationCatalog"},
+            {22000, nullptr, "GetReceivedFriendInvitationList"},
+            {22001, nullptr, "GetReceivedFriendInvitationDetailedInfo"},
+            {22010, nullptr, "GetReceivedFriendInvitationCountCache"},
             {30100, nullptr, "DropFriendNewlyFlags"},
             {30101, nullptr, "DeleteFriend"},
             {30110, nullptr, "DropFriendNewlyFlag"},
@@ -91,6 +100,11 @@ public:
             {30812, nullptr, "ChangePlayLogPermission"},
             {30820, nullptr, "IssueFriendCode"},
             {30830, nullptr, "ClearPlayLog"},
+            {30900, nullptr, "SendFriendInvitation"},
+            {30910, nullptr, "ReadFriendInvitation"},
+            {30911, nullptr, "ReadAllFriendInvitations"},
+            {40100, nullptr, "Unknown40100"},
+            {40400, nullptr, "Unknown40400"},
             {49900, nullptr, "DeleteNetworkServiceAccountCache"},
         };
         // clang-format on
@@ -115,6 +129,15 @@ private:
         u64 group_id;
     };
     static_assert(sizeof(SizedFriendFilter) == 0x10, "SizedFriendFilter is an invalid size");
+
+    void GetBlockedUserListIds(Kernel::HLERequestContext& ctx) {
+        // This is safe to stub, as there should be no adverse consequences from reporting no
+        // blocked users.
+        LOG_WARNING(Service_ACC, "(STUBBED) called");
+        IPC::ResponseBuilder rb{ctx, 3};
+        rb.Push(RESULT_SUCCESS);
+        rb.Push<u32>(0); // Indicates there are no blocked users
+    }
 
     void DeclareCloseOnlinePlaySession(Kernel::HLERequestContext& ctx) {
         // Stub used by Splatoon 2
@@ -149,7 +172,8 @@ private:
 
 class INotificationService final : public ServiceFramework<INotificationService> {
 public:
-    INotificationService(Common::UUID uuid) : ServiceFramework("INotificationService"), uuid(uuid) {
+    explicit INotificationService(Common::UUID uuid_, Core::System& system_)
+        : ServiceFramework{system_, "INotificationService"}, uuid{uuid_} {
         // clang-format off
         static const FunctionInfo functions[] = {
             {0, &INotificationService::GetEvent, "GetEvent"},
@@ -159,6 +183,10 @@ public:
         // clang-format on
 
         RegisterHandlers(functions);
+
+        notification_event =
+            Kernel::KEvent::Create(system.Kernel(), "INotificationService:NotifyEvent");
+        notification_event->Initialize();
     }
 
 private:
@@ -167,14 +195,7 @@ private:
 
         IPC::ResponseBuilder rb{ctx, 2, 1};
         rb.Push(RESULT_SUCCESS);
-
-        if (!is_event_created) {
-            auto& kernel = Core::System::GetInstance().Kernel();
-            notification_event = Kernel::WritableEvent::CreateEventPair(
-                kernel, Kernel::ResetType::Manual, "INotificationService:NotifyEvent");
-            is_event_created = true;
-        }
-        rb.PushCopyObjects(notification_event.readable);
+        rb.PushCopyObjects(notification_event->GetReadableEvent());
     }
 
     void Clear(Kernel::HLERequestContext& ctx) {
@@ -210,8 +231,7 @@ private:
             break;
         default:
             // HOS seems not have an error case for an unknown notification
-            LOG_WARNING(Service_ACC, "Unknown notification {:08X}",
-                        static_cast<u32>(notification.notification_type));
+            LOG_WARNING(Service_ACC, "Unknown notification {:08X}", notification.notification_type);
             break;
         }
 
@@ -239,9 +259,8 @@ private:
         bool has_received_friend_request;
     };
 
-    Common::UUID uuid;
-    bool is_event_created = false;
-    Kernel::EventPair notification_event;
+    Common::UUID uuid{Common::INVALID_UUID};
+    std::shared_ptr<Kernel::KEvent> notification_event;
     std::queue<SizedNotificationInfo> notifications;
     States states{};
 };
@@ -249,7 +268,7 @@ private:
 void Module::Interface::CreateFriendService(Kernel::HLERequestContext& ctx) {
     IPC::ResponseBuilder rb{ctx, 2, 0, 1};
     rb.Push(RESULT_SUCCESS);
-    rb.PushIpcInterface<IFriendService>();
+    rb.PushIpcInterface<IFriendService>(system);
     LOG_DEBUG(Service_ACC, "called");
 }
 
@@ -261,21 +280,22 @@ void Module::Interface::CreateNotificationService(Kernel::HLERequestContext& ctx
 
     IPC::ResponseBuilder rb{ctx, 2, 0, 1};
     rb.Push(RESULT_SUCCESS);
-    rb.PushIpcInterface<INotificationService>(uuid);
+    rb.PushIpcInterface<INotificationService>(uuid, system);
 }
 
-Module::Interface::Interface(std::shared_ptr<Module> module, const char* name)
-    : ServiceFramework(name), module(std::move(module)) {}
+Module::Interface::Interface(std::shared_ptr<Module> module_, Core::System& system_,
+                             const char* name)
+    : ServiceFramework{system_, name}, module{std::move(module_)} {}
 
 Module::Interface::~Interface() = default;
 
-void InstallInterfaces(SM::ServiceManager& service_manager) {
+void InstallInterfaces(SM::ServiceManager& service_manager, Core::System& system) {
     auto module = std::make_shared<Module>();
-    std::make_shared<Friend>(module, "friend:a")->InstallAsService(service_manager);
-    std::make_shared<Friend>(module, "friend:m")->InstallAsService(service_manager);
-    std::make_shared<Friend>(module, "friend:s")->InstallAsService(service_manager);
-    std::make_shared<Friend>(module, "friend:u")->InstallAsService(service_manager);
-    std::make_shared<Friend>(module, "friend:v")->InstallAsService(service_manager);
+    std::make_shared<Friend>(module, system, "friend:a")->InstallAsService(service_manager);
+    std::make_shared<Friend>(module, system, "friend:m")->InstallAsService(service_manager);
+    std::make_shared<Friend>(module, system, "friend:s")->InstallAsService(service_manager);
+    std::make_shared<Friend>(module, system, "friend:u")->InstallAsService(service_manager);
+    std::make_shared<Friend>(module, system, "friend:v")->InstallAsService(service_manager);
 }
 
 } // namespace Service::Friend

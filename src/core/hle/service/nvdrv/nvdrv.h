@@ -7,13 +7,18 @@
 #include <memory>
 #include <unordered_map>
 #include <vector>
+
 #include "common/common_types.h"
-#include "core/hle/kernel/writable_event.h"
 #include "core/hle/service/nvdrv/nvdata.h"
+#include "core/hle/service/nvdrv/syncpoint_manager.h"
 #include "core/hle/service/service.h"
 
 namespace Core {
 class System;
+}
+
+namespace Kernel {
+class KEvent;
 }
 
 namespace Service::NVFlinger {
@@ -22,15 +27,23 @@ class NVFlinger;
 
 namespace Service::Nvidia {
 
+class SyncpointManager;
+
 namespace Devices {
 class nvdevice;
 }
+
+/// Represents an Nvidia event
+struct NvEvent {
+    std::shared_ptr<Kernel::KEvent> event;
+    Fence fence{};
+};
 
 struct EventInterface {
     // Mask representing currently busy events
     u64 events_mask{};
     // Each kernel event associated to an NV event
-    std::array<Kernel::EventPair, MaxNvEvents> events;
+    std::array<NvEvent, MaxNvEvents> events;
     // The status of the current NVEvent
     std::array<EventState, MaxNvEvents> status{};
     // Tells if an NVEvent is registered or not
@@ -54,7 +67,7 @@ struct EventInterface {
             }
             mask = mask >> 1;
         }
-        return {};
+        return std::nullopt;
     }
     void SetEventStatus(const u32 event_id, EventState new_status) {
         EventState old_status = status[event_id];
@@ -91,7 +104,7 @@ struct EventInterface {
 
 class Module final {
 public:
-    Module(Core::System& system);
+    explicit Module(Core::System& system_);
     ~Module();
 
     /// Returns a pointer to one of the available devices, identified by its name.
@@ -103,26 +116,39 @@ public:
         return std::static_pointer_cast<T>(itr->second);
     }
 
+    NvResult VerifyFD(DeviceFD fd) const;
+
     /// Opens a device node and returns a file descriptor to it.
-    u32 Open(const std::string& device_name);
+    DeviceFD Open(const std::string& device_name);
+
     /// Sends an ioctl command to the specified file descriptor.
-    u32 Ioctl(u32 fd, u32 command, const std::vector<u8>& input, std::vector<u8>& output,
-              IoctlCtrl& ctrl);
+    NvResult Ioctl1(DeviceFD fd, Ioctl command, const std::vector<u8>& input,
+                    std::vector<u8>& output);
+
+    NvResult Ioctl2(DeviceFD fd, Ioctl command, const std::vector<u8>& input,
+                    const std::vector<u8>& inline_input, std::vector<u8>& output);
+
+    NvResult Ioctl3(DeviceFD fd, Ioctl command, const std::vector<u8>& input,
+                    std::vector<u8>& output, std::vector<u8>& inline_output);
+
     /// Closes a device file descriptor and returns operation success.
-    ResultCode Close(u32 fd);
+    NvResult Close(DeviceFD fd);
 
     void SignalSyncpt(const u32 syncpoint_id, const u32 value);
 
-    Kernel::SharedPtr<Kernel::ReadableEvent> GetEvent(u32 event_id) const;
+    std::shared_ptr<Kernel::KReadableEvent> GetEvent(u32 event_id) const;
 
-    Kernel::SharedPtr<Kernel::WritableEvent> GetEventWriteable(u32 event_id) const;
+    std::shared_ptr<Kernel::KWritableEvent> GetEventWriteable(u32 event_id) const;
 
 private:
+    /// Manages syncpoints on the host
+    SyncpointManager syncpoint_manager;
+
     /// Id to use for the next open file descriptor.
-    u32 next_fd = 1;
+    DeviceFD next_fd = 1;
 
     /// Mapping of file descriptors to the devices they reference.
-    std::unordered_map<u32, std::shared_ptr<Devices::nvdevice>> open_files;
+    std::unordered_map<DeviceFD, std::shared_ptr<Devices::nvdevice>> open_files;
 
     /// Mapping of device node names to their implementation.
     std::unordered_map<std::string, std::shared_ptr<Devices::nvdevice>> devices;

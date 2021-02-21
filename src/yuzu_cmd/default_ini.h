@@ -65,22 +65,91 @@ button_screenshot=
 lstick=
 rstick=
 
+# Whether to enable or disable vibration
+# 0: Disabled, 1 (default): Enabled
+vibration_enabled=
+
+# Whether to enable or disable accurate vibrations
+# 0 (default): Disabled, 1: Enabled
+enable_accurate_vibrations=
+
 # for motion input, the following devices are available:
 #  - "motion_emu" (default) for emulating motion input from mouse input. Required parameters:
 #      - "update_period": update period in milliseconds (default to 100)
 #      - "sensitivity": the coefficient converting mouse movement to tilting angle (default to 0.01)
+#  - "cemuhookudp" reads motion input from a udp server that uses cemuhook's udp protocol
 motion_device=
 
 # for touch input, the following devices are available:
 #  - "emu_window" (default) for emulating touch input from mouse input to the emulation window. No parameters required
+#  - "cemuhookudp" reads touch input from a udp server that uses cemuhook's udp protocol
+#      - "min_x", "min_y", "max_x", "max_y": defines the udp device's touch screen coordinate system
 touch_device=
+
+# Most desktop operating systems do not expose a way to poll the motion state of the controllers
+# so as a way around it, cemuhook created a udp client/server protocol to broadcast the data directly
+# from a controller device to the client program. Citra has a client that can connect and read
+# from any cemuhook compatible motion program.
+
+# IPv4 address of the udp input server (Default "127.0.0.1")
+udp_input_address=127.0.0.1
+
+# Port of the udp input server. (Default 26760)
+udp_input_port=
+
+# The pad to request data on. Should be between 0 (Pad 1) and 3 (Pad 4). (Default 0)
+udp_pad_index=
 
 [Core]
 # Whether to use multi-core for CPU emulation
-# 0 (default): Disabled, 1: Enabled
+# 0: Disabled, 1 (default): Enabled
 use_multi_core=
 
+[Cpu]
+# Enable inline page tables optimization (faster guest memory access)
+# 0: Disabled, 1 (default): Enabled
+cpuopt_page_tables =
+
+# Enable block linking CPU optimization (reduce block dispatcher use during predictable jumps)
+# 0: Disabled, 1 (default): Enabled
+cpuopt_block_linking =
+
+# Enable return stack buffer CPU optimization (reduce block dispatcher use during predictable returns)
+# 0: Disabled, 1 (default): Enabled
+cpuopt_return_stack_buffer =
+
+# Enable fast dispatcher CPU optimization (use a two-tiered dispatcher architecture)
+# 0: Disabled, 1 (default): Enabled
+cpuopt_fast_dispatcher =
+
+# Enable context elimination CPU Optimization (reduce host memory use for guest context)
+# 0: Disabled, 1 (default): Enabled
+cpuopt_context_elimination =
+
+# Enable constant propagation CPU optimization (basic IR optimization)
+# 0: Disabled, 1 (default): Enabled
+cpuopt_const_prop =
+
+# Enable miscellaneous CPU optimizations (basic IR optimization)
+# 0: Disabled, 1 (default): Enabled
+cpuopt_misc_ir =
+
+# Enable reduction of memory misalignment checks (reduce memory fallbacks for misaligned access)
+# 0: Disabled, 1 (default): Enabled
+cpuopt_reduce_misalign_checks =
+
 [Renderer]
+# Which backend API to use.
+# 0 (default): OpenGL, 1: Vulkan
+backend =
+
+# Enable graphics API debugging mode.
+# 0 (default): Disabled, 1: Enabled
+debug =
+
+# Which Vulkan physical device to use (defaults to 0)
+vulkan_device =
+
 # Whether to use software or hardware rendering.
 # 0: Software, 1 (default): Hardware
 use_hw_renderer =
@@ -89,14 +158,25 @@ use_hw_renderer =
 # 0: Interpreter (slow), 1 (default): JIT (fast)
 use_shader_jit =
 
-# Resolution scale factor
-# 0: Auto (scales resolution to window size), 1: Native Switch screen resolution, Otherwise a scale
-# factor for the Switch resolution
-resolution_factor =
+# Aspect ratio
+# 0: Default (16:9), 1: Force 4:3, 2: Force 21:9, 3: Stretch to Window
+aspect_ratio =
+
+# Anisotropic filtering
+# 0: Default, 1: 2x, 2: 4x, 3: 8x, 4: 16x
+max_anisotropy =
 
 # Whether to enable V-Sync (caps the framerate at 60FPS) or not.
 # 0 (default): Off, 1: On
 use_vsync =
+
+# Whether to use OpenGL assembly shaders or not. NV_gpu_program5 is required.
+# 0: Off, 1 (default): On
+use_assembly_shaders =
+
+# Whether to allow asynchronous shader building.
+# 0 (default): Off, 1: On
+use_asynchronous_shaders =
 
 # Turns on the frame limiter, which will limit frames output to the target game speed
 # 0: Off, 1: On (default)
@@ -110,13 +190,18 @@ frame_limit =
 # 0 (default): Off, 1 : On
 use_disk_shader_cache =
 
-# Whether to use accurate GPU emulation
-# 0 (default): Off (fast), 1 : On (slow)
-use_accurate_gpu_emulation =
+# Which gpu accuracy level to use
+# 0 (Normal), 1 (High), 2 (Extreme)
+gpu_accuracy =
 
 # Whether to use asynchronous GPU emulation
 # 0 : Off (slow), 1 (default): On (fast)
 use_asynchronous_gpu_emulation =
+
+# Forces VSync on the display thread. Usually doesn't impact performance, but on some drivers it can
+# so only turn this off if you notice a speed difference.
+# 0: Off, 1 (default): On
+use_vsync =
 
 # The clear color for the renderer. What shows up on the sides of the bottom screen.
 # Must be in range of 0.0-1.0. Defaults to 1.0 for all.
@@ -173,9 +258,23 @@ volume =
 # 1 (default): Yes, 0: No
 use_virtual_sd =
 
+# Whether or not to enable gamecard emulation
+# 1: Yes, 0 (default): No
+gamecard_inserted =
+
+# Whether or not the gamecard should be emulated as the current game
+# If 'gamecard_inserted' is 0 this setting is irrelevant
+# 1: Yes, 0 (default): No
+gamecard_current_game =
+
+# Path to an XCI file to use as the gamecard
+# If 'gamecard_inserted' is 0 this setting is irrelevant
+# If 'gamecard_current_game' is 1 this setting is irrelevant
+gamecard_path =
+
 [System]
 # Whether the system is docked
-# 1: Yes, 0 (default): No
+# 1 (default): Yes, 0: No
 use_docked_mode =
 
 # Allow the use of NFC in games
@@ -207,15 +306,18 @@ language_index =
 # -1: Auto-select (default), 0: Japan, 1: USA, 2: Europe, 3: Australia, 4: China, 5: Korea, 6: Taiwan
 region_value =
 
+# The system time zone that yuzu will use during emulation
+# 0: Auto-select (default), 1: Default (system archive value), Others: Index for specified time zone
+time_zone_index =
+
 [Miscellaneous]
 # A filter which removes logs below a certain logging level.
 # Examples: *:Debug Kernel.SVC:Trace Service.*:Critical
 log_filter = *:Trace
 
 [Debugging]
-# Port for listening to GDB connections.
-use_gdbstub=false
-gdbstub_port=24689
+# Record frame time data, can be found in the log directory. Boolean value
+record_frame_times =
 # Determines whether or not yuzu will dump the ExeFS of all games it attempts to load while loading them
 dump_exefs=false
 # Determines whether or not yuzu will dump all NSOs it attempts to load while loading them
@@ -223,6 +325,8 @@ dump_nso=false
 # Determines whether or not yuzu will report to the game that the emulated console is in Kiosk Mode
 # false: Retail/Normal Mode (default), true: Kiosk Mode
 quest_flag =
+# Enables/Disables the macro JIT compiler
+disable_macro_jit=false
 
 [WebService]
 # Whether or not to enable telemetry
@@ -234,6 +338,11 @@ web_api_url = https://api.yuzu-emu.org
 # See https://profile.yuzu-emu.org/ for more info
 yuzu_username =
 yuzu_token =
+
+[Services]
+# The name of the backend to use for BCAT
+# If this is set to 'boxcat' boxcat will be used, otherwise a null implementation will be used
+bcat_backend =
 
 [AddOns]
 # Used to disable add-ons

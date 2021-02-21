@@ -12,7 +12,6 @@
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "core/core_timing.h"
-#include "core/core_timing_util.h"
 #include "core/settings.h"
 
 namespace AudioCore {
@@ -32,13 +31,14 @@ u32 Stream::GetNumChannels() const {
     return {};
 }
 
-Stream::Stream(Core::Timing::CoreTiming& core_timing, u32 sample_rate, Format format,
-               ReleaseCallback&& release_callback, SinkStream& sink_stream, std::string&& name_)
-    : sample_rate{sample_rate}, format{format}, release_callback{std::move(release_callback)},
-      sink_stream{sink_stream}, core_timing{core_timing}, name{std::move(name_)} {
-
-    release_event = core_timing.RegisterEvent(
-        name, [this](u64 userdata, s64 cycles_late) { ReleaseActiveBuffer(); });
+Stream::Stream(Core::Timing::CoreTiming& core_timing_, u32 sample_rate_, Format format_,
+               ReleaseCallback&& release_callback_, SinkStream& sink_stream_, std::string&& name_)
+    : sample_rate{sample_rate_}, format{format_}, release_callback{std::move(release_callback_)},
+      sink_stream{sink_stream_}, core_timing{core_timing_}, name{std::move(name_)} {
+    release_event =
+        Core::Timing::CreateEvent(name, [this](std::uintptr_t, std::chrono::nanoseconds ns_late) {
+            ReleaseActiveBuffer(ns_late);
+        });
 }
 
 void Stream::Play() {
@@ -51,6 +51,14 @@ void Stream::Stop() {
     UNIMPLEMENTED();
 }
 
+bool Stream::Flush() {
+    const bool had_buffers = !queued_buffers.empty();
+    while (!queued_buffers.empty()) {
+        queued_buffers.pop();
+    }
+    return had_buffers;
+}
+
 void Stream::SetVolume(float volume) {
     game_volume = volume;
 }
@@ -59,15 +67,13 @@ Stream::State Stream::GetState() const {
     return state;
 }
 
-s64 Stream::GetBufferReleaseCycles(const Buffer& buffer) const {
+std::chrono::nanoseconds Stream::GetBufferReleaseNS(const Buffer& buffer) const {
     const std::size_t num_samples{buffer.GetSamples().size() / GetNumChannels()};
-    const auto us =
-        std::chrono::microseconds((static_cast<u64>(num_samples) * 1000000) / sample_rate);
-    return Core::Timing::usToCycles(us);
+    return std::chrono::nanoseconds((static_cast<u64>(num_samples) * 1000000000ULL) / sample_rate);
 }
 
 static void VolumeAdjustSamples(std::vector<s16>& samples, float game_volume) {
-    const float volume{std::clamp(Settings::values.volume - (1.0f - game_volume), 0.0f, 1.0f)};
+    const float volume{std::clamp(Settings::Volume() - (1.0f - game_volume), 0.0f, 1.0f)};
 
     if (volume == 1.0f) {
         return;
@@ -80,7 +86,7 @@ static void VolumeAdjustSamples(std::vector<s16>& samples, float game_volume) {
     }
 }
 
-void Stream::PlayNextBuffer() {
+void Stream::PlayNextBuffer(std::chrono::nanoseconds ns_late) {
     if (!IsPlaying()) {
         // Ensure we are in playing state before playing the next buffer
         sink_stream.Flush();
@@ -105,14 +111,21 @@ void Stream::PlayNextBuffer() {
 
     sink_stream.EnqueueSamples(GetNumChannels(), active_buffer->GetSamples());
 
-    core_timing.ScheduleEvent(GetBufferReleaseCycles(*active_buffer), release_event, {});
+    const auto buffer_release_ns = GetBufferReleaseNS(*active_buffer);
+
+    // If ns_late is higher than the update rate ignore the delay
+    if (ns_late > buffer_release_ns) {
+        ns_late = {};
+    }
+
+    core_timing.ScheduleEvent(buffer_release_ns - ns_late, release_event, {});
 }
 
-void Stream::ReleaseActiveBuffer() {
+void Stream::ReleaseActiveBuffer(std::chrono::nanoseconds ns_late) {
     ASSERT(active_buffer);
     released_buffers.push(std::move(active_buffer));
     release_callback();
-    PlayNextBuffer();
+    PlayNextBuffer(ns_late);
 }
 
 bool Stream::QueueBuffer(BufferPtr&& buffer) {
@@ -124,7 +137,7 @@ bool Stream::QueueBuffer(BufferPtr&& buffer) {
     return false;
 }
 
-bool Stream::ContainsBuffer(Buffer::Tag tag) const {
+bool Stream::ContainsBuffer([[maybe_unused]] Buffer::Tag tag) const {
     UNIMPLEMENTED();
     return {};
 }
@@ -132,7 +145,25 @@ bool Stream::ContainsBuffer(Buffer::Tag tag) const {
 std::vector<Buffer::Tag> Stream::GetTagsAndReleaseBuffers(std::size_t max_count) {
     std::vector<Buffer::Tag> tags;
     for (std::size_t count = 0; count < max_count && !released_buffers.empty(); ++count) {
-        tags.push_back(released_buffers.front()->GetTag());
+        if (released_buffers.front()) {
+            tags.push_back(released_buffers.front()->GetTag());
+        } else {
+            ASSERT_MSG(false, "Invalid tag in released_buffers!");
+        }
+        released_buffers.pop();
+    }
+    return tags;
+}
+
+std::vector<Buffer::Tag> Stream::GetTagsAndReleaseBuffers() {
+    std::vector<Buffer::Tag> tags;
+    tags.reserve(released_buffers.size());
+    while (!released_buffers.empty()) {
+        if (released_buffers.front()) {
+            tags.push_back(released_buffers.front()->GetTag());
+        } else {
+            ASSERT_MSG(false, "Invalid tag in released_buffers!");
+        }
         released_buffers.pop();
     }
     return tags;

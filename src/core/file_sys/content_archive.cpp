@@ -10,10 +10,10 @@
 #include "common/logging/log.h"
 #include "core/crypto/aes_util.h"
 #include "core/crypto/ctr_encryption_layer.h"
+#include "core/crypto/key_manager.h"
 #include "core/file_sys/content_archive.h"
 #include "core/file_sys/nca_patch.h"
 #include "core/file_sys/partition_filesystem.h"
-#include "core/file_sys/romfs.h"
 #include "core/file_sys/vfs_offset.h"
 #include "core/loader/loader.h"
 
@@ -32,11 +32,28 @@ enum class NCASectionFilesystemType : u8 {
     ROMFS = 0x3,
 };
 
+struct IVFCLevel {
+    u64_le offset;
+    u64_le size;
+    u32_le block_size;
+    u32_le reserved;
+};
+static_assert(sizeof(IVFCLevel) == 0x18, "IVFCLevel has incorrect size.");
+
+struct IVFCHeader {
+    u32_le magic;
+    u32_le magic_number;
+    INSERT_PADDING_BYTES_NOINIT(8);
+    std::array<IVFCLevel, 6> levels;
+    INSERT_PADDING_BYTES_NOINIT(64);
+};
+static_assert(sizeof(IVFCHeader) == 0xE0, "IVFCHeader has incorrect size.");
+
 struct NCASectionHeaderBlock {
-    INSERT_PADDING_BYTES(3);
+    INSERT_PADDING_BYTES_NOINIT(3);
     NCASectionFilesystemType filesystem_type;
     NCASectionCryptoType crypto_type;
-    INSERT_PADDING_BYTES(3);
+    INSERT_PADDING_BYTES_NOINIT(3);
 };
 static_assert(sizeof(NCASectionHeaderBlock) == 0x8, "NCASectionHeaderBlock has incorrect size.");
 
@@ -44,7 +61,7 @@ struct NCASectionRaw {
     NCASectionHeaderBlock header;
     std::array<u8, 0x138> block_data;
     std::array<u8, 0x8> section_ctr;
-    INSERT_PADDING_BYTES(0xB8);
+    INSERT_PADDING_BYTES_NOINIT(0xB8);
 };
 static_assert(sizeof(NCASectionRaw) == 0x200, "NCASectionRaw has incorrect size.");
 
@@ -52,19 +69,19 @@ struct PFS0Superblock {
     NCASectionHeaderBlock header_block;
     std::array<u8, 0x20> hash;
     u32_le size;
-    INSERT_PADDING_BYTES(4);
+    INSERT_PADDING_BYTES_NOINIT(4);
     u64_le hash_table_offset;
     u64_le hash_table_size;
     u64_le pfs0_header_offset;
     u64_le pfs0_size;
-    INSERT_PADDING_BYTES(0x1B0);
+    INSERT_PADDING_BYTES_NOINIT(0x1B0);
 };
 static_assert(sizeof(PFS0Superblock) == 0x200, "PFS0Superblock has incorrect size.");
 
 struct RomFSSuperblock {
     NCASectionHeaderBlock header_block;
     IVFCHeader ivfc;
-    INSERT_PADDING_BYTES(0x118);
+    INSERT_PADDING_BYTES_NOINIT(0x118);
 };
 static_assert(sizeof(RomFSSuperblock) == 0x200, "RomFSSuperblock has incorrect size.");
 
@@ -72,24 +89,24 @@ struct BKTRHeader {
     u64_le offset;
     u64_le size;
     u32_le magic;
-    INSERT_PADDING_BYTES(0x4);
+    INSERT_PADDING_BYTES_NOINIT(0x4);
     u32_le number_entries;
-    INSERT_PADDING_BYTES(0x4);
+    INSERT_PADDING_BYTES_NOINIT(0x4);
 };
 static_assert(sizeof(BKTRHeader) == 0x20, "BKTRHeader has incorrect size.");
 
 struct BKTRSuperblock {
     NCASectionHeaderBlock header_block;
     IVFCHeader ivfc;
-    INSERT_PADDING_BYTES(0x18);
+    INSERT_PADDING_BYTES_NOINIT(0x18);
     BKTRHeader relocation;
     BKTRHeader subsection;
-    INSERT_PADDING_BYTES(0xC0);
+    INSERT_PADDING_BYTES_NOINIT(0xC0);
 };
 static_assert(sizeof(BKTRSuperblock) == 0x200, "BKTRSuperblock has incorrect size.");
 
 union NCASectionHeader {
-    NCASectionRaw raw;
+    NCASectionRaw raw{};
     PFS0Superblock pfs0;
     RomFSSuperblock romfs;
     BKTRSuperblock bktr;
@@ -101,9 +118,9 @@ static bool IsValidNCA(const NCAHeader& header) {
     return header.magic == Common::MakeMagic('N', 'C', 'A', '3');
 }
 
-NCA::NCA(VirtualFile file_, VirtualFile bktr_base_romfs_, u64 bktr_base_ivfc_offset,
-         Core::Crypto::KeyManager keys_)
-    : file(std::move(file_)), bktr_base_romfs(std::move(bktr_base_romfs_)), keys(std::move(keys_)) {
+NCA::NCA(VirtualFile file_, VirtualFile bktr_base_romfs_, u64 bktr_base_ivfc_offset)
+    : file(std::move(file_)),
+      bktr_base_romfs(std::move(bktr_base_romfs_)), keys{Core::Crypto::KeyManager::Instance()} {
     if (file == nullptr) {
         status = Loader::ResultStatus::ErrorNullFile;
         return;
@@ -306,7 +323,7 @@ bool NCA::ReadRomFSSection(const NCASectionHeader& section, const NCASectionTabl
         subsection_buckets.back().entries.push_back({section.bktr.relocation.offset, {0}, ctr_low});
         subsection_buckets.back().entries.push_back({size, {0}, 0});
 
-        std::optional<Core::Crypto::Key128> key = {};
+        std::optional<Core::Crypto::Key128> key;
         if (encrypted) {
             if (has_rights_id) {
                 status = Loader::ResultStatus::Success;
@@ -393,8 +410,9 @@ u8 NCA::GetCryptoRevision() const {
 std::optional<Core::Crypto::Key128> NCA::GetKeyAreaKey(NCASectionCryptoType type) const {
     const auto master_key_id = GetCryptoRevision();
 
-    if (!keys.HasKey(Core::Crypto::S128KeyType::KeyArea, master_key_id, header.key_index))
-        return {};
+    if (!keys.HasKey(Core::Crypto::S128KeyType::KeyArea, master_key_id, header.key_index)) {
+        return std::nullopt;
+    }
 
     std::vector<u8> key_area(header.key_area.begin(), header.key_area.end());
     Core::Crypto::AESCipher<Core::Crypto::Key128> cipher(
@@ -403,15 +421,17 @@ std::optional<Core::Crypto::Key128> NCA::GetKeyAreaKey(NCASectionCryptoType type
     cipher.Transcode(key_area.data(), key_area.size(), key_area.data(), Core::Crypto::Op::Decrypt);
 
     Core::Crypto::Key128 out;
-    if (type == NCASectionCryptoType::XTS)
+    if (type == NCASectionCryptoType::XTS) {
         std::copy(key_area.begin(), key_area.begin() + 0x10, out.begin());
-    else if (type == NCASectionCryptoType::CTR || type == NCASectionCryptoType::BKTR)
+    } else if (type == NCASectionCryptoType::CTR || type == NCASectionCryptoType::BKTR) {
         std::copy(key_area.begin() + 0x20, key_area.begin() + 0x30, out.begin());
-    else
+    } else {
         LOG_CRITICAL(Crypto, "Called GetKeyAreaKey on invalid NCASectionCryptoType type={:02X}",
-                     static_cast<u8>(type));
+                     type);
+    }
+
     u128 out_128{};
-    memcpy(out_128.data(), out.data(), 16);
+    std::memcpy(out_128.data(), out.data(), sizeof(u128));
     LOG_TRACE(Crypto, "called with crypto_rev={:02X}, kak_index={:02X}, key={:016X}{:016X}",
               master_key_id, header.key_index, out_128[1], out_128[0]);
 
@@ -425,18 +445,18 @@ std::optional<Core::Crypto::Key128> NCA::GetTitlekey() {
     memcpy(rights_id.data(), header.rights_id.data(), 16);
     if (rights_id == u128{}) {
         status = Loader::ResultStatus::ErrorInvalidRightsID;
-        return {};
+        return std::nullopt;
     }
 
     auto titlekey = keys.GetKey(Core::Crypto::S128KeyType::Titlekey, rights_id[1], rights_id[0]);
     if (titlekey == Core::Crypto::Key128{}) {
         status = Loader::ResultStatus::ErrorMissingTitlekey;
-        return {};
+        return std::nullopt;
     }
 
     if (!keys.HasKey(Core::Crypto::S128KeyType::Titlekek, master_key_id)) {
         status = Loader::ResultStatus::ErrorMissingTitlekek;
-        return {};
+        return std::nullopt;
     }
 
     Core::Crypto::AESCipher<Core::Crypto::Key128> cipher(
@@ -460,7 +480,7 @@ VirtualFile NCA::Decrypt(const NCASectionHeader& s_header, VirtualFile in, u64 s
     case NCASectionCryptoType::BKTR:
         LOG_TRACE(Crypto, "called with mode=CTR, starting_offset={:016X}", starting_offset);
         {
-            std::optional<Core::Crypto::Key128> key = {};
+            std::optional<Core::Crypto::Key128> key;
             if (has_rights_id) {
                 status = Loader::ResultStatus::Success;
                 key = GetTitlekey();
@@ -479,9 +499,10 @@ VirtualFile NCA::Decrypt(const NCASectionHeader& s_header, VirtualFile in, u64 s
 
             auto out = std::make_shared<Core::Crypto::CTREncryptionLayer>(std::move(in), *key,
                                                                           starting_offset);
-            std::vector<u8> iv(16);
-            for (u8 i = 0; i < 8; ++i)
-                iv[i] = s_header.raw.section_ctr[0x8 - i - 1];
+            Core::Crypto::CTREncryptionLayer::IVData iv{};
+            for (std::size_t i = 0; i < 8; ++i) {
+                iv[i] = s_header.raw.section_ctr[8 - i - 1];
+            }
             out->SetIV(iv);
             return std::static_pointer_cast<VfsFile>(out);
         }
@@ -489,7 +510,7 @@ VirtualFile NCA::Decrypt(const NCASectionHeader& s_header, VirtualFile in, u64 s
         // TODO(DarkLordZach): Find a test case for XTS-encrypted NCAs
     default:
         LOG_ERROR(Crypto, "called with unhandled crypto type={:02X}",
-                  static_cast<u8>(s_header.raw.header.crypto_type));
+                  s_header.raw.header.crypto_type);
         return nullptr;
     }
 }
@@ -498,15 +519,17 @@ Loader::ResultStatus NCA::GetStatus() const {
     return status;
 }
 
-std::vector<std::shared_ptr<VfsFile>> NCA::GetFiles() const {
-    if (status != Loader::ResultStatus::Success)
+std::vector<VirtualFile> NCA::GetFiles() const {
+    if (status != Loader::ResultStatus::Success) {
         return {};
+    }
     return files;
 }
 
-std::vector<std::shared_ptr<VfsDirectory>> NCA::GetSubdirectories() const {
-    if (status != Loader::ResultStatus::Success)
+std::vector<VirtualDir> NCA::GetSubdirectories() const {
+    if (status != Loader::ResultStatus::Success) {
         return {};
+    }
     return dirs;
 }
 
@@ -514,7 +537,7 @@ std::string NCA::GetName() const {
     return file->GetName();
 }
 
-std::shared_ptr<VfsDirectory> NCA::GetParentDirectory() const {
+VirtualDir NCA::GetParentDirectory() const {
     return file->GetContainingDirectory();
 }
 
@@ -526,6 +549,14 @@ u64 NCA::GetTitleId() const {
     if (is_update || status == Loader::ResultStatus::ErrorMissingBKTRBaseRomFS)
         return header.title_id | 0x800;
     return header.title_id;
+}
+
+std::array<u8, 16> NCA::GetRightsId() const {
+    return header.rights_id;
+}
+
+u32 NCA::GetSDKVersion() const {
+    return header.sdk_version;
 }
 
 bool NCA::IsUpdate() const {

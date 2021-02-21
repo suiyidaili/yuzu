@@ -25,15 +25,15 @@ public:
         delete read_ptr;
     }
 
-    std::size_t Size() const {
+    [[nodiscard]] std::size_t Size() const {
         return size.load();
     }
 
-    bool Empty() const {
+    [[nodiscard]] bool Empty() const {
         return Size() == 0;
     }
 
-    T& Front() const {
+    [[nodiscard]] T& Front() const {
         return read_ptr->current;
     }
 
@@ -46,9 +46,16 @@ public:
         ElementPtr* new_ptr = new ElementPtr();
         write_ptr->next.store(new_ptr, std::memory_order_release);
         write_ptr = new_ptr;
-        cv.notify_one();
 
-        ++size;
+        const size_t previous_size{size++};
+
+        // Acquire the mutex and then immediately release it as a fence.
+        // TODO(bunnei): This can be replaced with C++20 waitable atomics when properly supported.
+        // See discussion on https://github.com/yuzu-emu/yuzu/pull/3173 for details.
+        if (previous_size == 0) {
+            std::lock_guard lock{cv_mutex};
+        }
+        cv.notify_one();
     }
 
     void Pop() {
@@ -123,15 +130,15 @@ private:
 template <typename T>
 class MPSCQueue {
 public:
-    std::size_t Size() const {
+    [[nodiscard]] std::size_t Size() const {
         return spsc_queue.Size();
     }
 
-    bool Empty() const {
+    [[nodiscard]] bool Empty() const {
         return spsc_queue.Empty();
     }
 
-    T& Front() const {
+    [[nodiscard]] T& Front() const {
         return spsc_queue.Front();
     }
 

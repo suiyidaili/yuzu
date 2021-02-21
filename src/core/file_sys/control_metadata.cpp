@@ -5,6 +5,7 @@
 #include "common/string_util.h"
 #include "common/swap.h"
 #include "core/file_sys/control_metadata.h"
+#include "core/file_sys/vfs.h"
 
 namespace FileSys {
 
@@ -93,6 +94,10 @@ bool NACP::GetUserAccountSwitchLock() const {
 
 u32 NACP::GetSupportedLanguages() const {
     return raw.supported_languages;
+}
+
+u64 NACP::GetDeviceSaveDataSize() const {
+    return raw.device_save_data_size;
 }
 
 std::vector<u8> NACP::GetRawBytes() const {

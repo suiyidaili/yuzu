@@ -4,12 +4,38 @@
 
 #pragma once
 
+#include <string_view>
 #include <utility>
 #include <glad/glad.h>
 #include "common/common_types.h"
 #include "video_core/renderer_opengl/gl_shader_util.h"
 
 namespace OpenGL {
+
+class OGLRenderbuffer : private NonCopyable {
+public:
+    OGLRenderbuffer() = default;
+
+    OGLRenderbuffer(OGLRenderbuffer&& o) noexcept : handle(std::exchange(o.handle, 0)) {}
+
+    ~OGLRenderbuffer() {
+        Release();
+    }
+
+    OGLRenderbuffer& operator=(OGLRenderbuffer&& o) noexcept {
+        Release();
+        handle = std::exchange(o.handle, 0);
+        return *this;
+    }
+
+    /// Creates a new internal OpenGL resource and stores the handle
+    void Create();
+
+    /// Deletes the internal OpenGL resource
+    void Release();
+
+    GLuint handle = 0;
+};
 
 class OGLTexture : private NonCopyable {
 public:
@@ -102,7 +128,7 @@ public:
         return *this;
     }
 
-    void Create(const char* source, GLenum type);
+    void Create(std::string_view source, GLenum type);
 
     void Release();
 
@@ -135,6 +161,28 @@ public:
     /// Creates a new internal OpenGL resource and stores the handle
     void CreateFromSource(const char* vert_shader, const char* geo_shader, const char* frag_shader,
                           bool separable_program = false, bool hint_retrievable = false);
+
+    /// Deletes the internal OpenGL resource
+    void Release();
+
+    GLuint handle = 0;
+};
+
+class OGLAssemblyProgram : private NonCopyable {
+public:
+    OGLAssemblyProgram() = default;
+
+    OGLAssemblyProgram(OGLAssemblyProgram&& o) noexcept : handle(std::exchange(o.handle, 0)) {}
+
+    ~OGLAssemblyProgram() {
+        Release();
+    }
+
+    OGLAssemblyProgram& operator=(OGLAssemblyProgram&& o) noexcept {
+        Release();
+        handle = std::exchange(o.handle, 0);
+        return *this;
+    }
 
     /// Deletes the internal OpenGL resource
     void Release();
@@ -186,9 +234,6 @@ public:
     /// Deletes the internal OpenGL resource
     void Release();
 
-    // Converts the buffer into a stream copy buffer with a fixed size
-    void MakeStreamCopy(std::size_t buffer_size);
-
     GLuint handle = 0;
 };
 
@@ -216,31 +261,6 @@ public:
     GLsync handle = 0;
 };
 
-class OGLVertexArray : private NonCopyable {
-public:
-    OGLVertexArray() = default;
-
-    OGLVertexArray(OGLVertexArray&& o) noexcept : handle(std::exchange(o.handle, 0)) {}
-
-    ~OGLVertexArray() {
-        Release();
-    }
-
-    OGLVertexArray& operator=(OGLVertexArray&& o) noexcept {
-        Release();
-        handle = std::exchange(o.handle, 0);
-        return *this;
-    }
-
-    /// Creates a new internal OpenGL resource and stores the handle
-    void Create();
-
-    /// Deletes the internal OpenGL resource
-    void Release();
-
-    GLuint handle = 0;
-};
-
 class OGLFramebuffer : private NonCopyable {
 public:
     OGLFramebuffer() = default;
@@ -259,6 +279,31 @@ public:
 
     /// Creates a new internal OpenGL resource and stores the handle
     void Create();
+
+    /// Deletes the internal OpenGL resource
+    void Release();
+
+    GLuint handle = 0;
+};
+
+class OGLQuery : private NonCopyable {
+public:
+    OGLQuery() = default;
+
+    OGLQuery(OGLQuery&& o) noexcept : handle(std::exchange(o.handle, 0)) {}
+
+    ~OGLQuery() {
+        Release();
+    }
+
+    OGLQuery& operator=(OGLQuery&& o) noexcept {
+        Release();
+        handle = std::exchange(o.handle, 0);
+        return *this;
+    }
+
+    /// Creates a new internal OpenGL resource and stores the handle
+    void Create(GLenum target);
 
     /// Deletes the internal OpenGL resource
     void Release();

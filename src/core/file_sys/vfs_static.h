@@ -31,7 +31,7 @@ public:
         return true;
     }
 
-    std::shared_ptr<VfsDirectory> GetContainingDirectory() const override {
+    VirtualDir GetContainingDirectory() const override {
         return parent;
     }
 
@@ -54,9 +54,11 @@ public:
     }
 
     std::optional<u8> ReadByte(std::size_t offset) const override {
-        if (offset < size)
-            return value;
-        return {};
+        if (offset >= size) {
+            return std::nullopt;
+        }
+
+        return value;
     }
 
     std::vector<u8> ReadBytes(std::size_t length, std::size_t offset) const override {

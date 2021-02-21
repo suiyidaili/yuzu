@@ -6,12 +6,13 @@
 #include "core/core.h"
 #include "core/core_timing.h"
 #include "core/hle/ipc_helpers.h"
+#include "core/hle/kernel/kernel.h"
 #include "core/hle/kernel/shared_memory.h"
 #include "core/hle/service/hid/irs.h"
 
 namespace Service::HID {
 
-IRS::IRS() : ServiceFramework{"irs"} {
+IRS::IRS(Core::System& system_) : ServiceFramework{system_, "irs"} {
     // clang-format off
     static const FunctionInfo functions[] = {
         {302, &IRS::ActivateIrsensor, "ActivateIrsensor"},
@@ -37,10 +38,9 @@ IRS::IRS() : ServiceFramework{"irs"} {
 
     RegisterHandlers(functions);
 
-    auto& kernel = Core::System::GetInstance().Kernel();
-    shared_mem = Kernel::SharedMemory::Create(
-        kernel, nullptr, 0x8000, Kernel::MemoryPermission::ReadWrite,
-        Kernel::MemoryPermission::Read, 0, Kernel::MemoryRegion::BASE, "IRS:SharedMemory");
+    auto& kernel = system.Kernel();
+
+    shared_mem = SharedFrom(&kernel.GetIrsSharedMem());
 }
 
 void IRS::ActivateIrsensor(Kernel::HLERequestContext& ctx) {
@@ -98,7 +98,7 @@ void IRS::GetImageTransferProcessorState(Kernel::HLERequestContext& ctx) {
 
     IPC::ResponseBuilder rb{ctx, 5};
     rb.Push(RESULT_SUCCESS);
-    rb.PushRaw<u64>(Core::System::GetInstance().CoreTiming().GetTicks());
+    rb.PushRaw<u64>(system.CoreTiming().GetCPUTicks());
     rb.PushRaw<u32>(0);
 }
 
@@ -175,7 +175,7 @@ void IRS::ActivateIrsensorWithFunctionLevel(Kernel::HLERequestContext& ctx) {
 
 IRS::~IRS() = default;
 
-IRS_SYS::IRS_SYS() : ServiceFramework{"irs:sys"} {
+IRS_SYS::IRS_SYS(Core::System& system_) : ServiceFramework{system_, "irs:sys"} {
     // clang-format off
     static const FunctionInfo functions[] = {
         {500, nullptr, "SetAppletResourceUserId"},

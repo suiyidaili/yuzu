@@ -7,12 +7,13 @@
 #include "common/common_funcs.h"
 #include "common/file_util.h"
 #include "common/logging/log.h"
+#include "core/core.h"
 #include "core/file_sys/content_archive.h"
 #include "core/file_sys/control_metadata.h"
 #include "core/file_sys/patch_manager.h"
 #include "core/file_sys/romfs_factory.h"
-#include "core/gdbstub/gdbstub.h"
 #include "core/hle/kernel/kernel.h"
+#include "core/hle/kernel/memory/page_table.h"
 #include "core/hle/kernel/process.h"
 #include "core/hle/service/filesystem/filesystem.h"
 #include "core/loader/deconstructed_rom_directory.h"
@@ -87,7 +88,7 @@ FileType AppLoader_DeconstructedRomDirectory::IdentifyType(const FileSys::Virtua
 }
 
 AppLoader_DeconstructedRomDirectory::LoadResult AppLoader_DeconstructedRomDirectory::Load(
-    Kernel::Process& process) {
+    Kernel::Process& process, Core::System& system) {
     if (is_loaded) {
         return {ResultStatus::ErrorAlreadyLoaded, {}};
     }
@@ -112,7 +113,8 @@ AppLoader_DeconstructedRomDirectory::LoadResult AppLoader_DeconstructedRomDirect
     }
 
     if (override_update) {
-        const FileSys::PatchManager patch_manager(metadata.GetTitleID());
+        const FileSys::PatchManager patch_manager(
+            metadata.GetTitleID(), system.GetFileSystemController(), system.GetContentProvider());
         dir = patch_manager.PatchExeFS(dir);
     }
 
@@ -128,33 +130,48 @@ AppLoader_DeconstructedRomDirectory::LoadResult AppLoader_DeconstructedRomDirect
     }
     metadata.Print();
 
-    const FileSys::ProgramAddressSpaceType arch_bits{metadata.GetAddressSpaceType()};
-    if (arch_bits == FileSys::ProgramAddressSpaceType::Is32Bit ||
-        arch_bits == FileSys::ProgramAddressSpaceType::Is32BitNoMap) {
-        return {ResultStatus::Error32BitISA, {}};
-    }
+    const auto static_modules = {"rtld",    "main",    "subsdk0", "subsdk1", "subsdk2", "subsdk3",
+                                 "subsdk4", "subsdk5", "subsdk6", "subsdk7", "sdk"};
 
-    if (process.LoadFromMetadata(metadata).IsError()) {
-        return {ResultStatus::ErrorUnableToParseKernelMetadata, {}};
-    }
-
-    const FileSys::PatchManager pm(metadata.GetTitleID());
-
-    // Load NSO modules
-    modules.clear();
-    const VAddr base_address = process.VMManager().GetCodeRegionBaseAddress();
-    VAddr next_load_addr = base_address;
-    for (const auto& module : {"rtld", "main", "subsdk0", "subsdk1", "subsdk2", "subsdk3",
-                               "subsdk4", "subsdk5", "subsdk6", "subsdk7", "sdk"}) {
-        const FileSys::VirtualFile module_file = dir->GetFile(module);
-        if (module_file == nullptr) {
+    // Use the NSO module loader to figure out the code layout
+    std::size_t code_size{};
+    for (const auto& module : static_modules) {
+        const FileSys::VirtualFile module_file{dir->GetFile(module)};
+        if (!module_file) {
             continue;
         }
 
-        const VAddr load_addr = next_load_addr;
         const bool should_pass_arguments = std::strcmp(module, "rtld") == 0;
-        const auto tentative_next_load_addr =
-            AppLoader_NSO::LoadModule(process, *module_file, load_addr, should_pass_arguments, pm);
+        const auto tentative_next_load_addr = AppLoader_NSO::LoadModule(
+            process, system, *module_file, code_size, should_pass_arguments, false);
+        if (!tentative_next_load_addr) {
+            return {ResultStatus::ErrorLoadingNSO, {}};
+        }
+
+        code_size = *tentative_next_load_addr;
+    }
+
+    // Setup the process code layout
+    if (process.LoadFromMetadata(metadata, code_size).IsError()) {
+        return {ResultStatus::ErrorUnableToParseKernelMetadata, {}};
+    }
+
+    // Load NSO modules
+    modules.clear();
+    const VAddr base_address{process.PageTable().GetCodeRegionStart()};
+    VAddr next_load_addr{base_address};
+    const FileSys::PatchManager pm{metadata.GetTitleID(), system.GetFileSystemController(),
+                                   system.GetContentProvider()};
+    for (const auto& module : static_modules) {
+        const FileSys::VirtualFile module_file{dir->GetFile(module)};
+        if (!module_file) {
+            continue;
+        }
+
+        const VAddr load_addr{next_load_addr};
+        const bool should_pass_arguments = std::strcmp(module, "rtld") == 0;
+        const auto tentative_next_load_addr = AppLoader_NSO::LoadModule(
+            process, system, *module_file, load_addr, should_pass_arguments, true, pm);
         if (!tentative_next_load_addr) {
             return {ResultStatus::ErrorLoadingNSO, {}};
         }
@@ -162,8 +179,6 @@ AppLoader_DeconstructedRomDirectory::LoadResult AppLoader_DeconstructedRomDirect
         next_load_addr = *tentative_next_load_addr;
         modules.insert_or_assign(load_addr, module);
         LOG_DEBUG(Loader, "loaded module {} @ 0x{:X}", module, load_addr);
-        // Register module with GDBStub
-        GDBStub::RegisterModule(module, load_addr, next_load_addr - 1, false);
     }
 
     // Find the RomFS by searching for a ".romfs" file in this directory
@@ -176,7 +191,8 @@ AppLoader_DeconstructedRomDirectory::LoadResult AppLoader_DeconstructedRomDirect
     // Register the RomFS if a ".romfs" file was found
     if (romfs_iter != files.end() && *romfs_iter != nullptr) {
         romfs = *romfs_iter;
-        Service::FileSystem::RegisterRomFS(std::make_unique<FileSys::RomFSFactory>(*this));
+        system.GetFileSystemController().RegisterRomFS(std::make_unique<FileSys::RomFSFactory>(
+            *this, system.GetContentProvider(), system.GetFileSystemController()));
     }
 
     is_loaded = true;

@@ -8,14 +8,14 @@
 #include <cstddef>
 #include <list>
 #include <string>
+#include <unordered_map>
 #include <vector>
 #include "common/common_types.h"
-#include "core/hle/kernel/address_arbiter.h"
 #include "core/hle/kernel/handle_table.h"
-#include "core/hle/kernel/mutex.h"
+#include "core/hle/kernel/k_address_arbiter.h"
+#include "core/hle/kernel/k_condition_variable.h"
+#include "core/hle/kernel/k_synchronization_object.h"
 #include "core/hle/kernel/process_capability.h"
-#include "core/hle/kernel/vm_manager.h"
-#include "core/hle/kernel/wait_object.h"
 #include "core/hle/result.h"
 
 namespace Core {
@@ -29,11 +29,15 @@ class ProgramMetadata;
 namespace Kernel {
 
 class KernelCore;
-class ResourceLimit;
-class Thread;
+class KResourceLimit;
+class KThread;
 class TLSPage;
 
 struct CodeSet;
+
+namespace Memory {
+class PageTable;
+}
 
 enum class MemoryRegion : u16 {
     APPLICATION = 1,
@@ -59,8 +63,11 @@ enum class ProcessStatus {
     DebugBreak,
 };
 
-class Process final : public WaitObject {
+class Process final : public KSynchronizationObject {
 public:
+    explicit Process(Core::System& system);
+    ~Process() override;
+
     enum : u64 {
         /// Lowest allowed process ID for a kernel initial process.
         InitialKIPIDMin = 1,
@@ -81,7 +88,8 @@ public:
 
     static constexpr std::size_t RANDOM_ENTROPY_SIZE = 4;
 
-    static SharedPtr<Process> Create(Core::System& system, std::string name, ProcessType type);
+    static std::shared_ptr<Process> Create(Core::System& system, std::string name,
+                                           ProcessType type);
 
     std::string GetTypeName() const override {
         return "Process";
@@ -95,14 +103,14 @@ public:
         return HANDLE_TYPE;
     }
 
-    /// Gets a reference to the process' memory manager.
-    Kernel::VMManager& VMManager() {
-        return vm_manager;
+    /// Gets a reference to the process' page table.
+    Memory::PageTable& PageTable() {
+        return *page_table;
     }
 
-    /// Gets a const reference to the process' memory manager.
-    const Kernel::VMManager& VMManager() const {
-        return vm_manager;
+    /// Gets const a reference to the process' page table.
+    const Memory::PageTable& PageTable() const {
+        return *page_table;
     }
 
     /// Gets a reference to the process' handle table.
@@ -115,24 +123,30 @@ public:
         return handle_table;
     }
 
-    /// Gets a reference to the process' address arbiter.
-    AddressArbiter& GetAddressArbiter() {
-        return address_arbiter;
+    ResultCode SignalToAddress(VAddr address) {
+        return condition_var.SignalToAddress(address);
     }
 
-    /// Gets a const reference to the process' address arbiter.
-    const AddressArbiter& GetAddressArbiter() const {
-        return address_arbiter;
+    ResultCode WaitForAddress(Handle handle, VAddr address, u32 tag) {
+        return condition_var.WaitForAddress(handle, address, tag);
     }
 
-    /// Gets a reference to the process' mutex lock.
-    Mutex& GetMutex() {
-        return mutex;
+    void SignalConditionVariable(u64 cv_key, int32_t count) {
+        return condition_var.Signal(cv_key, count);
     }
 
-    /// Gets a const reference to the process' mutex lock
-    const Mutex& GetMutex() const {
-        return mutex;
+    ResultCode WaitConditionVariable(VAddr address, u64 cv_key, u32 tag, s64 ns) {
+        return condition_var.Wait(address, cv_key, tag, ns);
+    }
+
+    ResultCode SignalAddressArbiter(VAddr address, Svc::SignalType signal_type, s32 value,
+                                    s32 count) {
+        return address_arbiter.SignalToAddress(address, signal_type, value, count);
+    }
+
+    ResultCode WaitAddressArbiter(VAddr address, Svc::ArbitrationType arb_type, s32 value,
+                                  s64 timeout) {
+        return address_arbiter.WaitForAddress(address, arb_type, value, timeout);
     }
 
     /// Gets the address to the process' dedicated TLS region.
@@ -156,11 +170,16 @@ public:
     }
 
     /// Gets the resource limit descriptor for this process
-    SharedPtr<ResourceLimit> GetResourceLimit() const;
+    std::shared_ptr<KResourceLimit> GetResourceLimit() const;
 
     /// Gets the ideal CPU core ID for this process
-    u8 GetIdealCore() const {
+    u8 GetIdealCoreId() const {
         return ideal_core;
+    }
+
+    /// Checks if the specified thread priority is valid.
+    bool CheckThreadPriority(s32 prio) const {
+        return ((1ULL << prio) & GetPriorityMask()) != 0;
     }
 
     /// Gets the bitmask of allowed cores that this process' threads can run on.
@@ -198,6 +217,14 @@ public:
         return is_64bit_process;
     }
 
+    [[nodiscard]] bool IsSuspended() const {
+        return is_suspended;
+    }
+
+    void SetSuspended(bool suspended) {
+        is_suspended = suspended;
+    }
+
     /// Gets the total running time of the process instance in ticks.
     u64 GetCPUTimeTicks() const {
         return total_process_running_time_ticks;
@@ -206,6 +233,43 @@ public:
     /// Updates the total running time, adding the given ticks to it.
     void UpdateCPUTimeTicks(u64 ticks) {
         total_process_running_time_ticks += ticks;
+    }
+
+    /// Gets the process schedule count, used for thread yelding
+    s64 GetScheduledCount() const {
+        return schedule_count;
+    }
+
+    /// Increments the process schedule count, used for thread yielding.
+    void IncrementScheduledCount() {
+        ++schedule_count;
+    }
+
+    void IncrementThreadCount();
+    void DecrementThreadCount();
+
+    void SetRunningThread(s32 core, KThread* thread, u64 idle_count) {
+        running_threads[core] = thread;
+        running_thread_idle_counts[core] = idle_count;
+    }
+
+    void ClearRunningThread(KThread* thread) {
+        for (size_t i = 0; i < running_threads.size(); ++i) {
+            if (running_threads[i] == thread) {
+                running_threads[i] = nullptr;
+            }
+        }
+    }
+
+    [[nodiscard]] KThread* GetRunningThread(s32 core) const {
+        return running_threads[core];
+    }
+
+    bool ReleaseUserException(KThread* thread);
+
+    [[nodiscard]] KThread* GetPinnedThread(s32 core_id) const {
+        ASSERT(0 <= core_id && core_id < static_cast<s32>(Core::Hardware::NUM_CPU_CORES));
+        return pinned_threads[core_id];
     }
 
     /// Gets 8 bytes of random data for svcGetInfo RandomEntropy
@@ -228,17 +292,17 @@ public:
     u64 GetTotalPhysicalMemoryUsedWithoutSystemResource() const;
 
     /// Gets the list of all threads created with this process as their owner.
-    const std::list<const Thread*>& GetThreadList() const {
+    const std::list<const KThread*>& GetThreadList() const {
         return thread_list;
     }
 
     /// Registers a thread as being created under this process,
     /// adding it to this process' thread list.
-    void RegisterThread(const Thread* thread);
+    void RegisterThread(const KThread* thread);
 
     /// Unregisters a thread from this process, removing it
     /// from this process' thread list.
-    void UnregisterThread(const Thread* thread);
+    void UnregisterThread(const KThread* thread);
 
     /// Clears the signaled state of the process if and only if it's signaled.
     ///
@@ -248,7 +312,7 @@ public:
     /// @pre The process must be in a signaled state. If this is called on a
     ///      process instance that is not signaled, ERR_INVALID_STATE will be
     ///      returned.
-    ResultCode ClearSignalState();
+    ResultCode Reset();
 
     /**
      * Loads process-specifics configuration info with metadata provided
@@ -259,7 +323,7 @@ public:
      * @returns RESULT_SUCCESS if all relevant metadata was able to be
      *          loaded and parsed. Otherwise, an error code is returned.
      */
-    ResultCode LoadFromMetadata(const FileSys::ProgramMetadata& metadata);
+    ResultCode LoadFromMetadata(const FileSys::ProgramMetadata& metadata, std::size_t code_size);
 
     /**
      * Starts the main application thread for this process.
@@ -275,7 +339,18 @@ public:
      */
     void PrepareForTermination();
 
-    void LoadModule(CodeSet module_, VAddr base_addr);
+    void LoadModule(CodeSet code_set, VAddr base_addr);
+
+    bool IsSignaled() const override;
+
+    void Finalize() override {}
+
+    void PinCurrentThread();
+    void UnpinCurrentThread();
+
+    KLightLock& GetStateLock() {
+        return state_lock;
+    }
 
     ///////////////////////////////////////////////////////////////////////////////////////////////
     // Thread-local storage management
@@ -287,14 +362,19 @@ public:
     void FreeTLSRegion(VAddr tls_address);
 
 private:
-    explicit Process(Core::System& system);
-    ~Process() override;
+    void PinThread(s32 core_id, KThread* thread) {
+        ASSERT(0 <= core_id && core_id < static_cast<s32>(Core::Hardware::NUM_CPU_CORES));
+        ASSERT(thread != nullptr);
+        ASSERT(pinned_threads[core_id] == nullptr);
+        pinned_threads[core_id] = thread;
+    }
 
-    /// Checks if the specified thread should wait until this process is available.
-    bool ShouldWait(const Thread* thread) const override;
-
-    /// Acquires/locks this process for the specified thread if it's available.
-    void Acquire(Thread* thread) override;
+    void UnpinThread(s32 core_id, KThread* thread) {
+        ASSERT(0 <= core_id && core_id < static_cast<s32>(Core::Hardware::NUM_CPU_CORES));
+        ASSERT(thread != nullptr);
+        ASSERT(pinned_threads[core_id] == thread);
+        pinned_threads[core_id] = nullptr;
+    }
 
     /// Changes the process status. If the status is different
     /// from the current process status, then this will trigger
@@ -302,16 +382,10 @@ private:
     void ChangeStatus(ProcessStatus new_status);
 
     /// Allocates the main thread stack for the process, given the stack size in bytes.
-    void AllocateMainThreadStack(u64 stack_size);
+    ResultCode AllocateMainThreadStack(std::size_t stack_size);
 
-    /// Memory manager for this process.
-    Kernel::VMManager vm_manager;
-
-    /// Size of the main thread's stack in bytes.
-    u64 main_thread_stack_size = 0;
-
-    /// Size of the loaded code memory in bytes.
-    u64 code_memory_size = 0;
+    /// Memory manager for this process
+    std::unique_ptr<Memory::PageTable> page_table;
 
     /// Current status of the process
     ProcessStatus status{};
@@ -328,7 +402,7 @@ private:
     u32 system_resource_size = 0;
 
     /// Resource limit descriptor for this process
-    SharedPtr<ResourceLimit> resource_limit;
+    std::shared_ptr<KResourceLimit> resource_limit;
 
     /// The ideal CPU core for this process, threads are scheduled on this core by default.
     u8 ideal_core = 0;
@@ -348,10 +422,6 @@ private:
     /// specified by metadata provided to the process during loading.
     bool is_64bit_process = true;
 
-    /// Whether or not this process is signaled. This occurs
-    /// upon the process changing to a different state.
-    bool is_signaled = false;
-
     /// Total running time for the process in ticks.
     u64 total_process_running_time_ticks = 0;
 
@@ -359,12 +429,12 @@ private:
     HandleTable handle_table;
 
     /// Per-process address arbiter.
-    AddressArbiter address_arbiter;
+    KAddressArbiter address_arbiter;
 
     /// The per-process mutex lock instance used for handling various
     /// forms of services, such as lock arbitration, and condition
     /// variable related facilities.
-    Mutex mutex;
+    KConditionVariable condition_var;
 
     /// Address indicating the location of the process' dedicated TLS region.
     VAddr tls_region_address = 0;
@@ -373,13 +443,43 @@ private:
     std::array<u64, RANDOM_ENTROPY_SIZE> random_entropy{};
 
     /// List of threads that are running with this process as their owner.
-    std::list<const Thread*> thread_list;
+    std::list<const KThread*> thread_list;
 
-    /// System context
-    Core::System& system;
+    /// Address of the top of the main thread's stack
+    VAddr main_thread_stack_top{};
+
+    /// Size of the main thread's stack
+    std::size_t main_thread_stack_size{};
+
+    /// Memory usage capacity for the process
+    std::size_t memory_usage_capacity{};
+
+    /// Process total image size
+    std::size_t image_size{};
 
     /// Name of this process
     std::string name;
+
+    /// Schedule count of this process
+    s64 schedule_count{};
+
+    bool is_signaled{};
+    bool is_suspended{};
+
+    std::atomic<s32> num_created_threads{};
+    std::atomic<u16> num_threads{};
+    u16 peak_num_threads{};
+
+    std::array<KThread*, Core::Hardware::NUM_CPU_CORES> running_threads{};
+    std::array<u64, Core::Hardware::NUM_CPU_CORES> running_thread_idle_counts{};
+    std::array<KThread*, Core::Hardware::NUM_CPU_CORES> pinned_threads{};
+
+    KThread* exception_thread{};
+
+    KLightLock state_lock;
+
+    /// System context
+    Core::System& system;
 };
 
 } // namespace Kernel

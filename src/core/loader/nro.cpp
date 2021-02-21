@@ -10,13 +10,14 @@
 #include "common/file_util.h"
 #include "common/logging/log.h"
 #include "common/swap.h"
+#include "core/core.h"
 #include "core/file_sys/control_metadata.h"
 #include "core/file_sys/romfs_factory.h"
 #include "core/file_sys/vfs_offset.h"
-#include "core/gdbstub/gdbstub.h"
 #include "core/hle/kernel/code_set.h"
+#include "core/hle/kernel/k_thread.h"
+#include "core/hle/kernel/memory/page_table.h"
 #include "core/hle/kernel/process.h"
-#include "core/hle/kernel/vm_manager.h"
 #include "core/hle/service/filesystem/filesystem.h"
 #include "core/loader/nro.h"
 #include "core/loader/nso.h"
@@ -126,11 +127,11 @@ FileType AppLoader_NRO::IdentifyType(const FileSys::VirtualFile& file) {
 }
 
 static constexpr u32 PageAlignSize(u32 size) {
-    return (size + Memory::PAGE_MASK) & ~Memory::PAGE_MASK;
+    return static_cast<u32>((size + Core::Memory::PAGE_MASK) & ~Core::Memory::PAGE_MASK);
 }
 
 static bool LoadNroImpl(Kernel::Process& process, const std::vector<u8>& data,
-                        const std::string& name, VAddr load_base) {
+                        const std::string& name) {
     if (data.size() < sizeof(NroHeader)) {
         return {};
     }
@@ -186,40 +187,40 @@ static bool LoadNroImpl(Kernel::Process& process, const std::vector<u8>& data,
     codeset.DataSegment().size += bss_size;
     program_image.resize(static_cast<u32>(program_image.size()) + bss_size);
 
+    // Setup the process code layout
+    if (process.LoadFromMetadata(FileSys::ProgramMetadata::GetDefault(), program_image.size())
+            .IsError()) {
+        return false;
+    }
+
     // Load codeset for current process
     codeset.memory = std::move(program_image);
-    process.LoadModule(std::move(codeset), load_base);
-
-    // Register module with GDBStub
-    GDBStub::RegisterModule(name, load_base, load_base);
+    process.LoadModule(std::move(codeset), process.PageTable().GetCodeRegionStart());
 
     return true;
 }
 
-bool AppLoader_NRO::LoadNro(Kernel::Process& process, const FileSys::VfsFile& file,
-                            VAddr load_base) {
-    return LoadNroImpl(process, file.ReadAllBytes(), file.GetName(), load_base);
+bool AppLoader_NRO::LoadNro(Kernel::Process& process, const FileSys::VfsFile& file) {
+    return LoadNroImpl(process, file.ReadAllBytes(), file.GetName());
 }
 
-AppLoader_NRO::LoadResult AppLoader_NRO::Load(Kernel::Process& process) {
+AppLoader_NRO::LoadResult AppLoader_NRO::Load(Kernel::Process& process, Core::System& system) {
     if (is_loaded) {
         return {ResultStatus::ErrorAlreadyLoaded, {}};
     }
 
-    // Load NRO
-    const VAddr base_address = process.VMManager().GetCodeRegionBaseAddress();
-
-    if (!LoadNro(process, *file, base_address)) {
+    if (!LoadNro(process, *file)) {
         return {ResultStatus::ErrorLoadingNRO, {}};
     }
 
     if (romfs != nullptr) {
-        Service::FileSystem::RegisterRomFS(std::make_unique<FileSys::RomFSFactory>(*this));
+        system.GetFileSystemController().RegisterRomFS(std::make_unique<FileSys::RomFSFactory>(
+            *this, system.GetContentProvider(), system.GetFileSystemController()));
     }
 
     is_loaded = true;
-    return {ResultStatus::Success,
-            LoadParameters{Kernel::THREADPRIO_DEFAULT, Memory::DEFAULT_STACK_SIZE}};
+    return {ResultStatus::Success, LoadParameters{Kernel::KThread::DefaultThreadPriority,
+                                                  Core::Memory::DEFAULT_STACK_SIZE}};
 }
 
 ResultStatus AppLoader_NRO::ReadIcon(std::vector<u8>& buffer) {

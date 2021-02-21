@@ -15,38 +15,25 @@ namespace FileSys {
 
 constexpr char SAVE_DATA_SIZE_FILENAME[] = ".yuzu_save_size";
 
-std::string SaveDataDescriptor::DebugInfo() const {
-    return fmt::format("[type={:02X}, title_id={:016X}, user_id={:016X}{:016X}, save_id={:016X}, "
-                       "rank={}, index={}]",
-                       static_cast<u8>(type), title_id, user_id[1], user_id[0], save_id,
-                       static_cast<u8>(rank), index);
-}
+namespace {
 
-SaveDataFactory::SaveDataFactory(VirtualDir save_directory) : dir(std::move(save_directory)) {
-    // Delete all temporary storages
-    // On hardware, it is expected that temporary storage be empty at first use.
-    dir->DeleteSubdirectoryRecursive("temp");
-}
-
-SaveDataFactory::~SaveDataFactory() = default;
-
-ResultVal<VirtualDir> SaveDataFactory::Open(SaveDataSpaceId space, const SaveDataDescriptor& meta) {
+void PrintSaveDataAttributeWarnings(SaveDataAttribute meta) {
     if (meta.type == SaveDataType::SystemSaveData || meta.type == SaveDataType::SaveData) {
         if (meta.zero_1 != 0) {
             LOG_WARNING(Service_FS,
-                        "Possibly incorrect SaveDataDescriptor, type is "
+                        "Possibly incorrect SaveDataAttribute, type is "
                         "SystemSaveData||SaveData but offset 0x28 is non-zero ({:016X}).",
                         meta.zero_1);
         }
         if (meta.zero_2 != 0) {
             LOG_WARNING(Service_FS,
-                        "Possibly incorrect SaveDataDescriptor, type is "
+                        "Possibly incorrect SaveDataAttribute, type is "
                         "SystemSaveData||SaveData but offset 0x30 is non-zero ({:016X}).",
                         meta.zero_2);
         }
         if (meta.zero_3 != 0) {
             LOG_WARNING(Service_FS,
-                        "Possibly incorrect SaveDataDescriptor, type is "
+                        "Possibly incorrect SaveDataAttribute, type is "
                         "SystemSaveData||SaveData but offset 0x38 is non-zero ({:016X}).",
                         meta.zero_3);
         }
@@ -54,38 +41,78 @@ ResultVal<VirtualDir> SaveDataFactory::Open(SaveDataSpaceId space, const SaveDat
 
     if (meta.type == SaveDataType::SystemSaveData && meta.title_id != 0) {
         LOG_WARNING(Service_FS,
-                    "Possibly incorrect SaveDataDescriptor, type is SystemSaveData but title_id is "
+                    "Possibly incorrect SaveDataAttribute, type is SystemSaveData but title_id is "
                     "non-zero ({:016X}).",
                     meta.title_id);
     }
 
     if (meta.type == SaveDataType::DeviceSaveData && meta.user_id != u128{0, 0}) {
         LOG_WARNING(Service_FS,
-                    "Possibly incorrect SaveDataDescriptor, type is DeviceSaveData but user_id is "
+                    "Possibly incorrect SaveDataAttribute, type is DeviceSaveData but user_id is "
                     "non-zero ({:016X}{:016X})",
                     meta.user_id[1], meta.user_id[0]);
     }
+}
 
-    std::string save_directory =
-        GetFullPath(space, meta.type, meta.title_id, meta.user_id, meta.save_id);
+bool ShouldSaveDataBeAutomaticallyCreated(SaveDataSpaceId space, const SaveDataAttribute& attr) {
+    return attr.type == SaveDataType::CacheStorage || attr.type == SaveDataType::TemporaryStorage ||
+           (space == SaveDataSpaceId::NandUser && ///< Normal Save Data -- Current Title & User
+            (attr.type == SaveDataType::SaveData || attr.type == SaveDataType::DeviceSaveData) &&
+            attr.title_id == 0 && attr.save_id == 0);
+}
 
-    // TODO(DarkLordZach): Try to not create when opening, there are dedicated create save methods.
-    // But, user_ids don't match so this works for now.
+} // Anonymous namespace
+
+std::string SaveDataAttribute::DebugInfo() const {
+    return fmt::format("[title_id={:016X}, user_id={:016X}{:016X}, save_id={:016X}, type={:02X}, "
+                       "rank={}, index={}]",
+                       title_id, user_id[1], user_id[0], save_id, static_cast<u8>(type),
+                       static_cast<u8>(rank), index);
+}
+
+SaveDataFactory::SaveDataFactory(Core::System& system_, VirtualDir save_directory_)
+    : dir{std::move(save_directory_)}, system{system_} {
+    // Delete all temporary storages
+    // On hardware, it is expected that temporary storage be empty at first use.
+    dir->DeleteSubdirectoryRecursive("temp");
+}
+
+SaveDataFactory::~SaveDataFactory() = default;
+
+ResultVal<VirtualDir> SaveDataFactory::Create(SaveDataSpaceId space,
+                                              const SaveDataAttribute& meta) const {
+    PrintSaveDataAttributeWarnings(meta);
+
+    const auto save_directory =
+        GetFullPath(system, space, meta.type, meta.title_id, meta.user_id, meta.save_id);
+
+    auto out = dir->CreateDirectoryRelative(save_directory);
+
+    // Return an error if the save data doesn't actually exist.
+    if (out == nullptr) {
+        // TODO(DarkLordZach): Find out correct error code.
+        return RESULT_UNKNOWN;
+    }
+
+    return MakeResult<VirtualDir>(std::move(out));
+}
+
+ResultVal<VirtualDir> SaveDataFactory::Open(SaveDataSpaceId space,
+                                            const SaveDataAttribute& meta) const {
+
+    const auto save_directory =
+        GetFullPath(system, space, meta.type, meta.title_id, meta.user_id, meta.save_id);
 
     auto out = dir->GetDirectoryRelative(save_directory);
 
-    if (out == nullptr) {
-        // TODO(bunnei): This is a work-around to always create a save data directory if it does not
-        // already exist. This is a hack, as we do not understand yet how this works on hardware.
-        // Without a save data directory, many games will assert on boot. This should not have any
-        // bad side-effects.
-        out = dir->CreateDirectoryRelative(save_directory);
+    if (out == nullptr && ShouldSaveDataBeAutomaticallyCreated(space, meta)) {
+        return Create(space, meta);
     }
 
     // Return an error if the save data doesn't actually exist.
     if (out == nullptr) {
         // TODO(Subv): Find out correct error code.
-        return ResultCode(-1);
+        return RESULT_UNKNOWN;
     }
 
     return MakeResult<VirtualDir>(std::move(out));
@@ -109,12 +136,16 @@ std::string SaveDataFactory::GetSaveDataSpaceIdPath(SaveDataSpaceId space) {
     }
 }
 
-std::string SaveDataFactory::GetFullPath(SaveDataSpaceId space, SaveDataType type, u64 title_id,
-                                         u128 user_id, u64 save_id) {
+std::string SaveDataFactory::GetFullPath(Core::System& system, SaveDataSpaceId space,
+                                         SaveDataType type, u64 title_id, u128 user_id,
+                                         u64 save_id) {
     // According to switchbrew, if a save is of type SaveData and the title id field is 0, it should
     // be interpreted as the title id of the current process.
-    if (type == SaveDataType::SaveData && title_id == 0)
-        title_id = Core::CurrentProcess()->GetTitleID();
+    if (type == SaveDataType::SaveData || type == SaveDataType::DeviceSaveData) {
+        if (title_id == 0) {
+            title_id = system.CurrentProcess()->GetTitleID();
+        }
+    }
 
     std::string out = GetSaveDataSpaceIdPath(space);
 
@@ -138,7 +169,7 @@ std::string SaveDataFactory::GetFullPath(SaveDataSpaceId space, SaveDataType typ
 
 SaveDataSize SaveDataFactory::ReadSaveDataSize(SaveDataType type, u64 title_id,
                                                u128 user_id) const {
-    const auto path = GetFullPath(SaveDataSpaceId::NandUser, type, title_id, user_id, 0);
+    const auto path = GetFullPath(system, SaveDataSpaceId::NandUser, type, title_id, user_id, 0);
     const auto dir = GetOrCreateDirectoryRelative(this->dir, path);
 
     const auto size_file = dir->GetFile(SAVE_DATA_SIZE_FILENAME);
@@ -152,8 +183,8 @@ SaveDataSize SaveDataFactory::ReadSaveDataSize(SaveDataType type, u64 title_id,
 }
 
 void SaveDataFactory::WriteSaveDataSize(SaveDataType type, u64 title_id, u128 user_id,
-                                        SaveDataSize new_value) {
-    const auto path = GetFullPath(SaveDataSpaceId::NandUser, type, title_id, user_id, 0);
+                                        SaveDataSize new_value) const {
+    const auto path = GetFullPath(system, SaveDataSpaceId::NandUser, type, title_id, user_id, 0);
     const auto dir = GetOrCreateDirectoryRelative(this->dir, path);
 
     const auto size_file = dir->CreateFile(SAVE_DATA_SIZE_FILENAME);

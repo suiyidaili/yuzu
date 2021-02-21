@@ -9,11 +9,15 @@
 #include "common/common_types.h"
 #include "common/swap.h"
 #include "core/crypto/key_manager.h"
-#include "core/file_sys/content_archive.h"
 #include "core/file_sys/vfs.h"
-#include "core/loader/loader.h"
+
+namespace Loader {
+enum class ResultStatus : u16;
+}
 
 namespace FileSys {
+
+class NCA;
 
 struct NAXHeader {
     std::array<u8, 0x20> hmac;
@@ -43,13 +47,13 @@ public:
 
     NAXContentType GetContentType() const;
 
-    std::vector<std::shared_ptr<VfsFile>> GetFiles() const override;
+    std::vector<VirtualFile> GetFiles() const override;
 
-    std::vector<std::shared_ptr<VfsDirectory>> GetSubdirectories() const override;
+    std::vector<VirtualDir> GetSubdirectories() const override;
 
     std::string GetName() const override;
 
-    std::shared_ptr<VfsDirectory> GetParentDirectory() const override;
+    VirtualDir GetParentDirectory() const override;
 
 private:
     Loader::ResultStatus Parse(std::string_view path);
@@ -62,6 +66,6 @@ private:
 
     VirtualFile dec_file;
 
-    Core::Crypto::KeyManager keys;
+    Core::Crypto::KeyManager& keys;
 };
 } // namespace FileSys

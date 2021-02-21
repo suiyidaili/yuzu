@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "common/common_types.h"
+#include "core/core.h"
 #include "core/file_sys/card_image.h"
 #include "core/file_sys/content_archive.h"
 #include "core/file_sys/control_metadata.h"
@@ -19,18 +20,25 @@
 
 namespace Loader {
 
-AppLoader_XCI::AppLoader_XCI(FileSys::VirtualFile file)
-    : AppLoader(file), xci(std::make_unique<FileSys::XCI>(file)),
+AppLoader_XCI::AppLoader_XCI(FileSys::VirtualFile file,
+                             const Service::FileSystem::FileSystemController& fsc,
+                             const FileSys::ContentProvider& content_provider,
+                             std::size_t program_index)
+    : AppLoader(file), xci(std::make_unique<FileSys::XCI>(file, program_index)),
       nca_loader(std::make_unique<AppLoader_NCA>(xci->GetProgramNCAFile())) {
-    if (xci->GetStatus() != ResultStatus::Success)
+    if (xci->GetStatus() != ResultStatus::Success) {
         return;
+    }
 
     const auto control_nca = xci->GetNCAByType(FileSys::NCAContentType::Control);
-    if (control_nca == nullptr || control_nca->GetStatus() != ResultStatus::Success)
+    if (control_nca == nullptr || control_nca->GetStatus() != ResultStatus::Success) {
         return;
+    }
 
-    std::tie(nacp_file, icon_file) =
-        FileSys::PatchManager(xci->GetProgramTitleID()).ParseControlNCA(*control_nca);
+    std::tie(nacp_file, icon_file) = [this, &content_provider, &control_nca, &fsc] {
+        const FileSys::PatchManager pm{xci->GetProgramTitleID(), fsc, content_provider};
+        return pm.ParseControlNCA(*control_nca);
+    }();
 }
 
 AppLoader_XCI::~AppLoader_XCI() = default;
@@ -48,7 +56,7 @@ FileType AppLoader_XCI::IdentifyType(const FileSys::VirtualFile& file) {
     return FileType::Error;
 }
 
-AppLoader_XCI::LoadResult AppLoader_XCI::Load(Kernel::Process& process) {
+AppLoader_XCI::LoadResult AppLoader_XCI::Load(Kernel::Process& process, Core::System& system) {
     if (is_loaded) {
         return {ResultStatus::ErrorAlreadyLoaded, {}};
     }
@@ -65,14 +73,14 @@ AppLoader_XCI::LoadResult AppLoader_XCI::Load(Kernel::Process& process) {
         return {ResultStatus::ErrorMissingProductionKeyFile, {}};
     }
 
-    const auto result = nca_loader->Load(process);
+    const auto result = nca_loader->Load(process, system);
     if (result.first != ResultStatus::Success) {
         return result;
     }
 
     FileSys::VirtualFile update_raw;
     if (ReadUpdateRaw(update_raw) == ResultStatus::Success && update_raw != nullptr) {
-        Service::FileSystem::SetPackedUpdate(std::move(update_raw));
+        system.GetFileSystemController().SetPackedUpdate(std::move(update_raw));
     }
 
     is_loaded = true;

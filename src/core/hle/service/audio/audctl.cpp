@@ -8,7 +8,7 @@
 
 namespace Service::Audio {
 
-AudCtl::AudCtl() : ServiceFramework{"audctl"} {
+AudCtl::AudCtl(Core::System& system_) : ServiceFramework{system_, "audctl"} {
     // clang-format off
     static const FunctionInfo functions[] = {
         {0, nullptr, "GetTargetVolume"},
@@ -38,6 +38,9 @@ AudCtl::AudCtl() : ServiceFramework{"audctl"} {
         {24, nullptr, "GetSystemOutputMasterVolume"},
         {25, nullptr, "GetAudioVolumeDataForPlayReport"},
         {26, nullptr, "UpdateHeadphoneSettings"},
+        {27, nullptr, "SetVolumeMappingTableForDev"},
+        {28, nullptr, "GetAudioOutputChannelCountForPlayReport"},
+        {29, nullptr, "BindAudioOutputChannelCountUpdateEventForPlayReport"},
     };
     // clang-format on
 

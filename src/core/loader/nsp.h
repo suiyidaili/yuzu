@@ -10,9 +10,14 @@
 #include "core/loader/loader.h"
 
 namespace FileSys {
+class ContentProvider;
 class NACP;
 class NSP;
 } // namespace FileSys
+
+namespace Service::FileSystem {
+class FileSystemController;
+}
 
 namespace Loader {
 
@@ -21,12 +26,15 @@ class AppLoader_NCA;
 /// Loads an XCI file
 class AppLoader_NSP final : public AppLoader {
 public:
-    explicit AppLoader_NSP(FileSys::VirtualFile file);
+    explicit AppLoader_NSP(FileSys::VirtualFile file,
+                           const Service::FileSystem::FileSystemController& fsc,
+                           const FileSys::ContentProvider& content_provider,
+                           std::size_t program_index);
     ~AppLoader_NSP() override;
 
     /**
      * Returns the type of the file
-     * @param file std::shared_ptr<VfsFile> open file
+     * @param file open file
      * @return FileType found, or FileType::Error if this loader doesn't know it
      */
     static FileType IdentifyType(const FileSys::VirtualFile& file);
@@ -35,7 +43,7 @@ public:
         return IdentifyType(file);
     }
 
-    LoadResult Load(Kernel::Process& process) override;
+    LoadResult Load(Kernel::Process& process, Core::System& system) override;
 
     ResultStatus ReadRomFS(FileSys::VirtualFile& file) override;
     u64 ReadRomFSIVFCOffset() const override;

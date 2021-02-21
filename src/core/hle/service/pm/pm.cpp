@@ -2,6 +2,7 @@
 // Licensed under GPLv2 or any later version
 // Refer to the license.txt file included.
 
+#include "core/core.h"
 #include "core/hle/ipc_helpers.h"
 #include "core/hle/kernel/kernel.h"
 #include "core/hle/kernel/process.h"
@@ -16,9 +17,9 @@ constexpr ResultCode ERROR_PROCESS_NOT_FOUND{ErrorModule::PM, 1};
 
 constexpr u64 NO_PROCESS_FOUND_PID{0};
 
-std::optional<Kernel::SharedPtr<Kernel::Process>> SearchProcessList(
-    const std::vector<Kernel::SharedPtr<Kernel::Process>>& process_list,
-    std::function<bool(const Kernel::SharedPtr<Kernel::Process>&)> predicate) {
+std::optional<std::shared_ptr<Kernel::Process>> SearchProcessList(
+    const std::vector<std::shared_ptr<Kernel::Process>>& process_list,
+    std::function<bool(const std::shared_ptr<Kernel::Process>&)> predicate) {
     const auto iter = std::find_if(process_list.begin(), process_list.end(), predicate);
 
     if (iter == process_list.end()) {
@@ -29,7 +30,7 @@ std::optional<Kernel::SharedPtr<Kernel::Process>> SearchProcessList(
 }
 
 void GetApplicationPidGeneric(Kernel::HLERequestContext& ctx,
-                              const std::vector<Kernel::SharedPtr<Kernel::Process>>& process_list) {
+                              const std::vector<std::shared_ptr<Kernel::Process>>& process_list) {
     const auto process = SearchProcessList(process_list, [](const auto& process) {
         return process->GetProcessID() == Kernel::Process::ProcessIDMin;
     });
@@ -43,7 +44,7 @@ void GetApplicationPidGeneric(Kernel::HLERequestContext& ctx,
 
 class BootMode final : public ServiceFramework<BootMode> {
 public:
-    explicit BootMode() : ServiceFramework{"pm:bm"} {
+    explicit BootMode(Core::System& system_) : ServiceFramework{system_, "pm:bm"} {
         static const FunctionInfo functions[] = {
             {0, &BootMode::GetBootMode, "GetBootMode"},
             {1, &BootMode::SetMaintenanceBoot, "SetMaintenanceBoot"},
@@ -74,17 +75,17 @@ private:
 
 class DebugMonitor final : public ServiceFramework<DebugMonitor> {
 public:
-    explicit DebugMonitor(const Kernel::KernelCore& kernel)
-        : ServiceFramework{"pm:dmnt"}, kernel(kernel) {
+    explicit DebugMonitor(Core::System& system_)
+        : ServiceFramework{system_, "pm:dmnt"}, kernel{system_.Kernel()} {
         // clang-format off
         static const FunctionInfo functions[] = {
-            {0, nullptr, "GetDebugProcesses"},
-            {1, nullptr, "StartDebugProcess"},
-            {2, &DebugMonitor::GetTitlePid, "GetTitlePid"},
-            {3, nullptr, "EnableDebugForTitleId"},
-            {4, &DebugMonitor::GetApplicationPid, "GetApplicationPid"},
-            {5, nullptr, "EnableDebugForApplication"},
-            {6, nullptr, "DisableDebug"},
+            {0, nullptr, "GetJitDebugProcessIdList"},
+            {1, nullptr, "StartProcess"},
+            {2, &DebugMonitor::GetProcessId, "GetProcessId"},
+            {3, nullptr, "HookToCreateProcess"},
+            {4, &DebugMonitor::GetApplicationProcessId, "GetApplicationProcessId"},
+            {5, nullptr, "HookToCreateApplicationProgress"},
+            {6, nullptr, "ClearHook"},
         };
         // clang-format on
 
@@ -92,7 +93,7 @@ public:
     }
 
 private:
-    void GetTitlePid(Kernel::HLERequestContext& ctx) {
+    void GetProcessId(Kernel::HLERequestContext& ctx) {
         IPC::RequestParser rp{ctx};
         const auto title_id = rp.PopRaw<u64>();
 
@@ -114,7 +115,7 @@ private:
         rb.Push((*process)->GetProcessID());
     }
 
-    void GetApplicationPid(Kernel::HLERequestContext& ctx) {
+    void GetApplicationProcessId(Kernel::HLERequestContext& ctx) {
         LOG_DEBUG(Service_PM, "called");
         GetApplicationPidGeneric(ctx, kernel.GetProcessList());
     }
@@ -124,8 +125,9 @@ private:
 
 class Info final : public ServiceFramework<Info> {
 public:
-    explicit Info(const std::vector<Kernel::SharedPtr<Kernel::Process>>& process_list)
-        : ServiceFramework{"pm:info"}, process_list(process_list) {
+    explicit Info(Core::System& system_,
+                  const std::vector<std::shared_ptr<Kernel::Process>>& process_list_)
+        : ServiceFramework{system_, "pm:info"}, process_list{process_list_} {
         static const FunctionInfo functions[] = {
             {0, &Info::GetTitleId, "GetTitleId"},
         };
@@ -154,25 +156,25 @@ private:
         rb.Push((*process)->GetTitleID());
     }
 
-    const std::vector<Kernel::SharedPtr<Kernel::Process>>& process_list;
+    const std::vector<std::shared_ptr<Kernel::Process>>& process_list;
 };
 
 class Shell final : public ServiceFramework<Shell> {
 public:
-    explicit Shell(const Kernel::KernelCore& kernel)
-        : ServiceFramework{"pm:shell"}, kernel(kernel) {
+    explicit Shell(Core::System& system_)
+        : ServiceFramework{system_, "pm:shell"}, kernel{system_.Kernel()} {
         // clang-format off
         static const FunctionInfo functions[] = {
-            {0, nullptr, "LaunchProcess"},
-            {1, nullptr, "TerminateProcessByPid"},
-            {2, nullptr, "TerminateProcessByTitleId"},
-            {3, nullptr, "GetProcessEventWaiter"},
-            {4, nullptr, "GetProcessEventType"},
+            {0, nullptr, "LaunchProgram"},
+            {1, nullptr, "TerminateProcess"},
+            {2, nullptr, "TerminateProgram"},
+            {3, nullptr, "GetProcessEventHandle"},
+            {4, nullptr, "GetProcessEventInfo"},
             {5, nullptr, "NotifyBootFinished"},
-            {6, &Shell::GetApplicationPid, "GetApplicationPid"},
+            {6, &Shell::GetApplicationProcessIdForShell, "GetApplicationProcessIdForShell"},
             {7, nullptr, "BoostSystemMemoryResourceLimit"},
-            {8, nullptr, "EnableAdditionalSystemThreads"},
-            {9, nullptr, "GetUnimplementedEventHandle"},
+            {8, nullptr, "BoostApplicationThreadResourceLimit"},
+            {9, nullptr, "GetBootFinishedEventHandle"},
         };
         // clang-format on
 
@@ -180,7 +182,7 @@ public:
     }
 
 private:
-    void GetApplicationPid(Kernel::HLERequestContext& ctx) {
+    void GetApplicationProcessIdForShell(Kernel::HLERequestContext& ctx) {
         LOG_DEBUG(Service_PM, "called");
         GetApplicationPidGeneric(ctx, kernel.GetProcessList());
     }
@@ -189,11 +191,11 @@ private:
 };
 
 void InstallInterfaces(Core::System& system) {
-    std::make_shared<BootMode>()->InstallAsService(system.ServiceManager());
-    std::make_shared<DebugMonitor>(system.Kernel())->InstallAsService(system.ServiceManager());
-    std::make_shared<Info>(system.Kernel().GetProcessList())
+    std::make_shared<BootMode>(system)->InstallAsService(system.ServiceManager());
+    std::make_shared<DebugMonitor>(system)->InstallAsService(system.ServiceManager());
+    std::make_shared<Info>(system, system.Kernel().GetProcessList())
         ->InstallAsService(system.ServiceManager());
-    std::make_shared<Shell>(system.Kernel())->InstallAsService(system.ServiceManager());
+    std::make_shared<Shell>(system)->InstallAsService(system.ServiceManager());
 }
 
 } // namespace Service::PM

@@ -11,10 +11,14 @@ namespace Core::Timing {
 class CoreTiming;
 }
 
+namespace Core {
+class System;
+}
+
 namespace Service::HID {
 class ControllerBase {
 public:
-    ControllerBase();
+    explicit ControllerBase(Core::System& system);
     virtual ~ControllerBase();
 
     // Called when the controller is initialized
@@ -26,6 +30,10 @@ public:
     // When the controller is requesting an update for the shared memory
     virtual void OnUpdate(const Core::Timing::CoreTiming& core_timing, u8* data,
                           std::size_t size) = 0;
+
+    // When the controller is requesting a motion update for the shared memory
+    virtual void OnMotionUpdate(const Core::Timing::CoreTiming& core_timing, u8* data,
+                                std::size_t size) {}
 
     // Called when input devices should be loaded
     virtual void OnLoadInputDevices() = 0;
@@ -46,5 +54,7 @@ protected:
         s64_le entry_count;
     };
     static_assert(sizeof(CommonHeader) == 0x20, "CommonHeader is an invalid size");
+
+    Core::System& system;
 };
 } // namespace Service::HID

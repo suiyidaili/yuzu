@@ -4,101 +4,126 @@
 
 #pragma once
 
-#include <memory>
-#include <tuple>
-
-#include "common/common_types.h"
-#include "video_core/gpu.h"
-#include "video_core/rasterizer_cache.h"
-#include "video_core/renderer_vulkan/declarations.h"
-#include "video_core/renderer_vulkan/vk_scheduler.h"
-
-namespace Tegra {
-class MemoryManager;
-}
+#include "video_core/buffer_cache/buffer_cache.h"
+#include "video_core/engines/maxwell_3d.h"
+#include "video_core/renderer_vulkan/vk_compute_pass.h"
+#include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
+#include "video_core/renderer_vulkan/vk_update_descriptor.h"
+#include "video_core/vulkan_common/vulkan_memory_allocator.h"
+#include "video_core/vulkan_common/vulkan_wrapper.h"
 
 namespace Vulkan {
 
-class VKDevice;
-class VKFence;
-class VKMemoryManager;
-class VKStreamBuffer;
+class Device;
+class VKDescriptorPool;
+class VKScheduler;
 
-class CachedBufferEntry final : public RasterizerCacheObject {
+class BufferCacheRuntime;
+
+class Buffer : public VideoCommon::BufferBase<VideoCore::RasterizerInterface> {
 public:
-    explicit CachedBufferEntry(VAddr cpu_addr, std::size_t size, u64 offset, std::size_t alignment,
-                               u8* host_ptr);
+    explicit Buffer(BufferCacheRuntime&, VideoCommon::NullBufferParams null_params);
+    explicit Buffer(BufferCacheRuntime& runtime, VideoCore::RasterizerInterface& rasterizer_,
+                    VAddr cpu_addr_, u64 size_bytes_);
 
-    VAddr GetCpuAddr() const override {
-        return cpu_addr;
+    [[nodiscard]] VkBuffer Handle() const noexcept {
+        return *buffer;
     }
 
-    std::size_t GetSizeInBytes() const override {
-        return size;
-    }
-
-    std::size_t GetSize() const {
-        return size;
-    }
-
-    u64 GetOffset() const {
-        return offset;
-    }
-
-    std::size_t GetAlignment() const {
-        return alignment;
+    operator VkBuffer() const noexcept {
+        return *buffer;
     }
 
 private:
-    VAddr cpu_addr{};
-    std::size_t size{};
-    u64 offset{};
-    std::size_t alignment{};
+    vk::Buffer buffer;
+    MemoryCommit commit;
 };
 
-class VKBufferCache final : public RasterizerCache<std::shared_ptr<CachedBufferEntry>> {
+class BufferCacheRuntime {
+    friend Buffer;
+
+    using PrimitiveTopology = Tegra::Engines::Maxwell3D::Regs::PrimitiveTopology;
+    using IndexFormat = Tegra::Engines::Maxwell3D::Regs::IndexFormat;
+
 public:
-    explicit VKBufferCache(Tegra::MemoryManager& tegra_memory_manager,
-                           VideoCore::RasterizerInterface& rasterizer, const VKDevice& device,
-                           VKMemoryManager& memory_manager, VKScheduler& scheduler, u64 size);
-    ~VKBufferCache();
+    explicit BufferCacheRuntime(const Device& device_, MemoryAllocator& memory_manager_,
+                                VKScheduler& scheduler_, StagingBufferPool& staging_pool_,
+                                VKUpdateDescriptorQueue& update_descriptor_queue_,
+                                VKDescriptorPool& descriptor_pool);
 
-    /// Uploads data from a guest GPU address. Returns host's buffer offset where it's been
-    /// allocated.
-    u64 UploadMemory(GPUVAddr gpu_addr, std::size_t size, u64 alignment = 4, bool cache = true);
+    void Finish();
 
-    /// Uploads from a host memory. Returns host's buffer offset where it's been allocated.
-    u64 UploadHostMemory(const u8* raw_pointer, std::size_t size, u64 alignment = 4);
+    [[nodiscard]] StagingBufferRef UploadStagingBuffer(size_t size);
 
-    /// Reserves memory to be used by host's CPU. Returns mapped address and offset.
-    std::tuple<u8*, u64> ReserveMemory(std::size_t size, u64 alignment = 4);
+    [[nodiscard]] StagingBufferRef DownloadStagingBuffer(size_t size);
 
-    /// Reserves a region of memory to be used in subsequent upload/reserve operations.
-    void Reserve(std::size_t max_size);
+    void CopyBuffer(VkBuffer src_buffer, VkBuffer dst_buffer,
+                    std::span<const VideoCommon::BufferCopy> copies);
 
-    /// Ensures that the set data is sent to the device.
-    void Send();
+    void BindIndexBuffer(PrimitiveTopology topology, IndexFormat index_format, u32 num_indices,
+                         u32 base_vertex, VkBuffer buffer, u32 offset, u32 size);
 
-    /// Returns the buffer cache handle.
-    vk::Buffer GetBuffer() const {
-        return buffer_handle;
+    void BindQuadArrayIndexBuffer(u32 first, u32 count);
+
+    void BindVertexBuffer(u32 index, VkBuffer buffer, u32 offset, u32 size, u32 stride);
+
+    void BindTransformFeedbackBuffer(u32 index, VkBuffer buffer, u32 offset, u32 size);
+
+    std::span<u8> BindMappedUniformBuffer([[maybe_unused]] size_t stage,
+                                          [[maybe_unused]] u32 binding_index, u32 size) {
+        const StagingBufferRef ref = staging_pool.Request(size, MemoryUsage::Upload);
+        BindBuffer(ref.buffer, static_cast<u32>(ref.offset), size);
+        return ref.mapped_span;
     }
 
-protected:
-    // We do not have to flush this cache as things in it are never modified by us.
-    void FlushObjectInner(const std::shared_ptr<CachedBufferEntry>& object) override {}
+    void BindUniformBuffer(VkBuffer buffer, u32 offset, u32 size) {
+        BindBuffer(buffer, offset, size);
+    }
+
+    void BindStorageBuffer(VkBuffer buffer, u32 offset, u32 size,
+                           [[maybe_unused]] bool is_written) {
+        BindBuffer(buffer, offset, size);
+    }
 
 private:
-    void AlignBuffer(std::size_t alignment);
+    void BindBuffer(VkBuffer buffer, u32 offset, u32 size) {
+        update_descriptor_queue.AddBuffer(buffer, offset, size);
+    }
 
-    Tegra::MemoryManager& tegra_memory_manager;
+    void ReserveQuadArrayLUT(u32 num_indices, bool wait_for_idle);
 
-    std::unique_ptr<VKStreamBuffer> stream_buffer;
-    vk::Buffer buffer_handle;
+    void ReserveNullIndexBuffer();
 
-    u8* buffer_ptr = nullptr;
-    u64 buffer_offset = 0;
-    u64 buffer_offset_base = 0;
+    const Device& device;
+    MemoryAllocator& memory_allocator;
+    VKScheduler& scheduler;
+    StagingBufferPool& staging_pool;
+    VKUpdateDescriptorQueue& update_descriptor_queue;
+
+    vk::Buffer quad_array_lut;
+    MemoryCommit quad_array_lut_commit;
+    VkIndexType quad_array_lut_index_type{};
+    u32 current_num_indices = 0;
+
+    vk::Buffer null_index_buffer;
+    MemoryCommit null_index_buffer_commit;
+
+    Uint8Pass uint8_pass;
+    QuadIndexedPass quad_index_pass;
 };
+
+struct BufferCacheParams {
+    using Runtime = Vulkan::BufferCacheRuntime;
+    using Buffer = Vulkan::Buffer;
+
+    static constexpr bool IS_OPENGL = false;
+    static constexpr bool HAS_PERSISTENT_UNIFORM_BUFFER_BINDINGS = false;
+    static constexpr bool HAS_FULL_INDEX_AND_PRIMITIVE_SUPPORT = false;
+    static constexpr bool NEEDS_BIND_UNIFORM_INDEX = false;
+    static constexpr bool NEEDS_BIND_STORAGE_INDEX = false;
+    static constexpr bool USE_MEMORY_MAPS = true;
+};
+
+using BufferCache = VideoCommon::BufferCache<BufferCacheParams>;
 
 } // namespace Vulkan

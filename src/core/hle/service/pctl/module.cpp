@@ -11,7 +11,8 @@ namespace Service::PCTL {
 
 class IParentalControlService final : public ServiceFramework<IParentalControlService> {
 public:
-    IParentalControlService() : ServiceFramework("IParentalControlService") {
+    explicit IParentalControlService(Core::System& system_)
+        : ServiceFramework{system_, "IParentalControlService"} {
         // clang-format off
         static const FunctionInfo functions[] = {
             {1, &IParentalControlService::Initialize, "Initialize"},
@@ -31,6 +32,8 @@ public:
             {1014, nullptr, "ConfirmPlayableApplicationVideoOld"},
             {1015, nullptr, "ConfirmPlayableApplicationVideo"},
             {1016, nullptr, "ConfirmShowNewsPermission"},
+            {1017, nullptr, "EndFreeCommunication"},
+            {1018, nullptr, "IsFreeCommunicationAvailable"},
             {1031, nullptr, "IsRestrictionEnabled"},
             {1032, nullptr, "GetSafetyLevel"},
             {1033, nullptr, "SetSafetyLevel"},
@@ -47,11 +50,11 @@ public:
             {1046, nullptr, "DisableFeaturesForReset"},
             {1047, nullptr, "NotifyApplicationDownloadStarted"},
             {1048, nullptr, "NotifyNetworkProfileCreated"},
-            {1061, nullptr, "ConfirmStereoVisionRestrictionConfigurable"},
-            {1062, nullptr, "GetStereoVisionRestriction"},
-            {1063, nullptr, "SetStereoVisionRestriction"},
-            {1064, nullptr, "ResetConfirmedStereoVisionPermission"},
-            {1065, nullptr, "IsStereoVisionPermitted"},
+            {1061, &IParentalControlService::ConfirmStereoVisionRestrictionConfigurable, "ConfirmStereoVisionRestrictionConfigurable"},
+            {1062, &IParentalControlService::GetStereoVisionRestriction, "GetStereoVisionRestriction"},
+            {1063, &IParentalControlService::SetStereoVisionRestriction, "SetStereoVisionRestriction"},
+            {1064, &IParentalControlService::ResetConfirmedStereoVisionPermission, "ResetConfirmedStereoVisionPermission"},
+            {1065, &IParentalControlService::IsStereoVisionPermitted, "IsStereoVisionPermitted"},
             {1201, nullptr, "UnlockRestrictionTemporarily"},
             {1202, nullptr, "UnlockSystemSettingsRestriction"},
             {1203, nullptr, "SetPinCode"},
@@ -111,6 +114,7 @@ public:
             {2015, nullptr, "FinishSynchronizeParentalControlSettingsWithLastUpdated"},
             {2016, nullptr, "RequestUpdateExemptionListAsync"},
         };
+        // clang-format on
         RegisterHandlers(functions);
     }
 
@@ -128,6 +132,49 @@ private:
         IPC::ResponseBuilder rb{ctx, 2};
         rb.Push(RESULT_SUCCESS);
     }
+
+    void ConfirmStereoVisionRestrictionConfigurable(Kernel::HLERequestContext& ctx) {
+        LOG_WARNING(Service_PCTL, "(STUBBED) called");
+
+        IPC::ResponseBuilder rb{ctx, 2};
+        rb.Push(RESULT_SUCCESS);
+    }
+
+    void IsStereoVisionPermitted(Kernel::HLERequestContext& ctx) {
+        LOG_WARNING(Service_PCTL, "(STUBBED) called");
+
+        IPC::ResponseBuilder rb{ctx, 3};
+        rb.Push(RESULT_SUCCESS);
+        rb.Push(true);
+    }
+
+    void SetStereoVisionRestriction(Kernel::HLERequestContext& ctx) {
+        IPC::RequestParser rp{ctx};
+        const auto can_use = rp.Pop<bool>();
+        LOG_WARNING(Service_PCTL, "(STUBBED) called, can_use={}", can_use);
+
+        can_use_stereo_vision = can_use;
+
+        IPC::ResponseBuilder rb{ctx, 2};
+        rb.Push(RESULT_SUCCESS);
+    }
+
+    void GetStereoVisionRestriction(Kernel::HLERequestContext& ctx) {
+        LOG_WARNING(Service_PCTL, "(STUBBED) called");
+
+        IPC::ResponseBuilder rb{ctx, 3};
+        rb.Push(RESULT_SUCCESS);
+        rb.Push(can_use_stereo_vision);
+    }
+
+    void ResetConfirmedStereoVisionPermission(Kernel::HLERequestContext& ctx) {
+        LOG_WARNING(Service_PCTL, "(STUBBED) called");
+
+        IPC::ResponseBuilder rb{ctx, 2};
+        rb.Push(RESULT_SUCCESS);
+    }
+
+    bool can_use_stereo_vision = true;
 };
 
 void Module::Interface::CreateService(Kernel::HLERequestContext& ctx) {
@@ -135,7 +182,7 @@ void Module::Interface::CreateService(Kernel::HLERequestContext& ctx) {
 
     IPC::ResponseBuilder rb{ctx, 2, 0, 1};
     rb.Push(RESULT_SUCCESS);
-    rb.PushIpcInterface<IParentalControlService>();
+    rb.PushIpcInterface<IParentalControlService>(system);
 }
 
 void Module::Interface::CreateServiceWithoutInitialize(Kernel::HLERequestContext& ctx) {
@@ -143,20 +190,21 @@ void Module::Interface::CreateServiceWithoutInitialize(Kernel::HLERequestContext
 
     IPC::ResponseBuilder rb{ctx, 2, 0, 1};
     rb.Push(RESULT_SUCCESS);
-    rb.PushIpcInterface<IParentalControlService>();
+    rb.PushIpcInterface<IParentalControlService>(system);
 }
 
-Module::Interface::Interface(std::shared_ptr<Module> module, const char* name)
-    : ServiceFramework(name), module(std::move(module)) {}
+Module::Interface::Interface(Core::System& system_, std::shared_ptr<Module> module_,
+                             const char* name)
+    : ServiceFramework{system_, name}, module{std::move(module_)} {}
 
 Module::Interface::~Interface() = default;
 
-void InstallInterfaces(SM::ServiceManager& service_manager) {
+void InstallInterfaces(SM::ServiceManager& service_manager, Core::System& system) {
     auto module = std::make_shared<Module>();
-    std::make_shared<PCTL>(module, "pctl")->InstallAsService(service_manager);
-    std::make_shared<PCTL>(module, "pctl:a")->InstallAsService(service_manager);
-    std::make_shared<PCTL>(module, "pctl:r")->InstallAsService(service_manager);
-    std::make_shared<PCTL>(module, "pctl:s")->InstallAsService(service_manager);
+    std::make_shared<PCTL>(system, module, "pctl")->InstallAsService(service_manager);
+    std::make_shared<PCTL>(system, module, "pctl:a")->InstallAsService(service_manager);
+    std::make_shared<PCTL>(system, module, "pctl:r")->InstallAsService(service_manager);
+    std::make_shared<PCTL>(system, module, "pctl:s")->InstallAsService(service_manager);
 }
 
 } // namespace Service::PCTL

@@ -4,6 +4,7 @@
 
 #include "core/crypto/key_manager.h"
 #include "core/hle/ipc_helpers.h"
+#include "core/hle/service/es/es.h"
 #include "core/hle/service/service.h"
 
 namespace Service::ES {
@@ -13,7 +14,7 @@ constexpr ResultCode ERROR_INVALID_RIGHTS_ID{ErrorModule::ETicket, 3};
 
 class ETicket final : public ServiceFramework<ETicket> {
 public:
-    explicit ETicket() : ServiceFramework{"es"} {
+    explicit ETicket(Core::System& system_) : ServiceFramework{system_, "es"} {
         // clang-format off
         static const FunctionInfo functions[] = {
             {1, &ETicket::ImportTicket, "ImportTicket"},
@@ -26,8 +27,8 @@ public:
             {8, &ETicket::GetTitleKey, "GetTitleKey"},
             {9, &ETicket::CountCommonTicket, "CountCommonTicket"},
             {10, &ETicket::CountPersonalizedTicket, "CountPersonalizedTicket"},
-            {11, &ETicket::ListCommonTicket, "ListCommonTicket"},
-            {12, &ETicket::ListPersonalizedTicket, "ListPersonalizedTicket"},
+            {11, &ETicket::ListCommonTicketRightsIds, "ListCommonTicketRightsIds"},
+            {12, &ETicket::ListPersonalizedTicketRightsIds, "ListPersonalizedTicketRightsIds"},
             {13, nullptr, "ListMissingPersonalizedTicket"},
             {14, &ETicket::GetCommonTicketSize, "GetCommonTicketSize"},
             {15, &ETicket::GetPersonalizedTicketSize, "GetPersonalizedTicketSize"},
@@ -52,7 +53,48 @@ public:
             {34, nullptr, "GetEncryptedTicketSize"},
             {35, nullptr, "GetEncryptedTicketData"},
             {36, nullptr, "DeleteAllInactiveELicenseRequiredPersonalizedTicket"},
+            {37, nullptr, "OwnTicket2"},
+            {38, nullptr, "OwnTicket3"},
+            {501, nullptr, "Unknown501"},
+            {502, nullptr, "Unknown502"},
             {503, nullptr, "GetTitleKey"},
+            {504, nullptr, "Unknown504"},
+            {508, nullptr, "Unknown508"},
+            {509, nullptr, "Unknown509"},
+            {510, nullptr, "Unknown510"},
+            {511, nullptr, "Unknown511"},
+            {1001, nullptr, "Unknown1001"},
+            {1002, nullptr, "Unknown1001"},
+            {1003, nullptr, "Unknown1003"},
+            {1004, nullptr, "Unknown1004"},
+            {1005, nullptr, "Unknown1005"},
+            {1006, nullptr, "Unknown1006"},
+            {1007, nullptr, "Unknown1007"},
+            {1009, nullptr, "Unknown1009"},
+            {1010, nullptr, "Unknown1010"},
+            {1011, nullptr, "Unknown1011"},
+            {1012, nullptr, "Unknown1012"},
+            {1013, nullptr, "Unknown1013"},
+            {1014, nullptr, "Unknown1014"},
+            {1015, nullptr, "Unknown1015"},
+            {1016, nullptr, "Unknown1016"},
+            {1017, nullptr, "Unknown1017"},
+            {1018, nullptr, "Unknown1018"},
+            {1019, nullptr, "Unknown1019"},
+            {1020, nullptr, "Unknown1020"},
+            {1021, nullptr, "Unknown1021"},
+            {1501, nullptr, "Unknown1501"},
+            {1502, nullptr, "Unknown1502"},
+            {1503, nullptr, "Unknown1503"},
+            {1504, nullptr, "Unknown1504"},
+            {1505, nullptr, "Unknown1505"},
+            {2000, nullptr, "Unknown2000"},
+            {2001, nullptr, "Unknown2001"},
+            {2100, nullptr, "Unknown2100"},
+            {2501, nullptr, "Unknown2501"},
+            {2502, nullptr, "Unknown2502"},
+            {3001, nullptr, "Unknown3001"},
+            {3002, nullptr, "Unknown3002"},
         };
         // clang-format on
         RegisterHandlers(functions);
@@ -74,7 +116,6 @@ private:
     }
 
     void ImportTicket(Kernel::HLERequestContext& ctx) {
-        IPC::RequestParser rp{ctx};
         const auto ticket = ctx.ReadBuffer();
         const auto cert = ctx.ReadBuffer(1);
 
@@ -119,7 +160,7 @@ private:
             return;
         }
 
-        ctx.WriteBuffer(key.data(), key.size());
+        ctx.WriteBuffer(key);
 
         IPC::ResponseBuilder rb{ctx, 2};
         rb.Push(RESULT_SUCCESS);
@@ -128,7 +169,7 @@ private:
     void CountCommonTicket(Kernel::HLERequestContext& ctx) {
         LOG_DEBUG(Service_ETicket, "called");
 
-        const auto count = keys.GetCommonTickets().size();
+        const u32 count = static_cast<u32>(keys.GetCommonTickets().size());
 
         IPC::ResponseBuilder rb{ctx, 3};
         rb.Push(RESULT_SUCCESS);
@@ -138,19 +179,19 @@ private:
     void CountPersonalizedTicket(Kernel::HLERequestContext& ctx) {
         LOG_DEBUG(Service_ETicket, "called");
 
-        const auto count = keys.GetPersonalizedTickets().size();
+        const u32 count = static_cast<u32>(keys.GetPersonalizedTickets().size());
 
         IPC::ResponseBuilder rb{ctx, 3};
         rb.Push(RESULT_SUCCESS);
         rb.Push<u32>(count);
     }
 
-    void ListCommonTicket(Kernel::HLERequestContext& ctx) {
+    void ListCommonTicketRightsIds(Kernel::HLERequestContext& ctx) {
         u32 out_entries;
         if (keys.GetCommonTickets().empty())
             out_entries = 0;
         else
-            out_entries = ctx.GetWriteBufferSize() / sizeof(u128);
+            out_entries = static_cast<u32>(ctx.GetWriteBufferSize() / sizeof(u128));
 
         LOG_DEBUG(Service_ETicket, "called, entries={:016X}", out_entries);
 
@@ -160,7 +201,7 @@ private:
         std::transform(tickets.begin(), tickets.end(), std::back_inserter(ids),
                        [](const auto& pair) { return pair.first; });
 
-        out_entries = std::min<u32>(ids.size(), out_entries);
+        out_entries = static_cast<u32>(std::min<std::size_t>(ids.size(), out_entries));
         ctx.WriteBuffer(ids.data(), out_entries * sizeof(u128));
 
         IPC::ResponseBuilder rb{ctx, 3};
@@ -168,12 +209,12 @@ private:
         rb.Push<u32>(out_entries);
     }
 
-    void ListPersonalizedTicket(Kernel::HLERequestContext& ctx) {
+    void ListPersonalizedTicketRightsIds(Kernel::HLERequestContext& ctx) {
         u32 out_entries;
         if (keys.GetPersonalizedTickets().empty())
             out_entries = 0;
         else
-            out_entries = ctx.GetWriteBufferSize() / sizeof(u128);
+            out_entries = static_cast<u32>(ctx.GetWriteBufferSize() / sizeof(u128));
 
         LOG_DEBUG(Service_ETicket, "called, entries={:016X}", out_entries);
 
@@ -183,7 +224,7 @@ private:
         std::transform(tickets.begin(), tickets.end(), std::back_inserter(ids),
                        [](const auto& pair) { return pair.first; });
 
-        out_entries = std::min<u32>(ids.size(), out_entries);
+        out_entries = static_cast<u32>(std::min<std::size_t>(ids.size(), out_entries));
         ctx.WriteBuffer(ids.data(), out_entries * sizeof(u128));
 
         IPC::ResponseBuilder rb{ctx, 3};
@@ -261,11 +302,11 @@ private:
         rb.Push<u64>(write_size);
     }
 
-    Core::Crypto::KeyManager keys;
+    Core::Crypto::KeyManager& keys = Core::Crypto::KeyManager::Instance();
 };
 
-void InstallInterfaces(SM::ServiceManager& service_manager) {
-    std::make_shared<ETicket>()->InstallAsService(service_manager);
+void InstallInterfaces(SM::ServiceManager& service_manager, Core::System& system) {
+    std::make_shared<ETicket>(system)->InstallAsService(service_manager);
 }
 
 } // namespace Service::ES

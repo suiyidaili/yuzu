@@ -19,7 +19,7 @@
 #include "common/string_util.h"
 #endif
 
-namespace FileUtil {
+namespace Common::FS {
 
 // User paths for GetUserPath
 enum class UserPath {
@@ -32,6 +32,7 @@ enum class UserPath {
     SDMCDir,
     LoadDir,
     DumpDir,
+    ScreenshotsDir,
     ShaderDir,
     SysDataDir,
     UserDir,
@@ -47,19 +48,19 @@ struct FSTEntry {
 };
 
 // Returns true if file filename exists
-bool Exists(const std::string& filename);
+[[nodiscard]] bool Exists(const std::string& filename);
 
 // Returns true if filename is a directory
-bool IsDirectory(const std::string& filename);
+[[nodiscard]] bool IsDirectory(const std::string& filename);
 
 // Returns the size of filename (64bit)
-u64 GetSize(const std::string& filename);
+[[nodiscard]] u64 GetSize(const std::string& filename);
 
 // Overloaded GetSize, accepts file descriptor
-u64 GetSize(const int fd);
+[[nodiscard]] u64 GetSize(int fd);
 
 // Overloaded GetSize, accepts FILE*
-u64 GetSize(FILE* f);
+[[nodiscard]] u64 GetSize(FILE* f);
 
 // Returns true if successful, or path already exists.
 bool CreateDir(const std::string& filename);
@@ -119,7 +120,7 @@ u64 ScanDirectoryTree(const std::string& directory, FSTEntry& parent_entry,
 bool DeleteDirRecursively(const std::string& directory, unsigned int recursion = 256);
 
 // Returns the current directory
-std::optional<std::string> GetCurrentDir();
+[[nodiscard]] std::optional<std::string> GetCurrentDir();
 
 // Create directory and copy contents (does not overwrite existing files)
 void CopyDir(const std::string& source_path, const std::string& dest_path);
@@ -131,20 +132,20 @@ bool SetCurrentDir(const std::string& directory);
 // directory. To be used in "multi-user" mode (that is, installed).
 const std::string& GetUserPath(UserPath path, const std::string& new_path = "");
 
-std::string GetHactoolConfigurationPath();
+[[nodiscard]] std::string GetHactoolConfigurationPath();
 
-std::string GetNANDRegistrationDir(bool system = false);
+[[nodiscard]] std::string GetNANDRegistrationDir(bool system = false);
 
 // Returns the path to where the sys file are
-std::string GetSysDirectory();
+[[nodiscard]] std::string GetSysDirectory();
 
 #ifdef __APPLE__
-std::string GetBundleDirectory();
+[[nodiscard]] std::string GetBundleDirectory();
 #endif
 
 #ifdef _WIN32
-const std::string& GetExeDirectory();
-std::string AppDataRoamingDirectory();
+[[nodiscard]] const std::string& GetExeDirectory();
+[[nodiscard]] std::string AppDataRoamingDirectory();
 #endif
 
 std::size_t WriteStringToFile(bool text_file, const std::string& filename, std::string_view str);
@@ -163,38 +164,55 @@ void SplitFilename83(const std::string& filename, std::array<char, 9>& short_nam
 
 // Splits the path on '/' or '\' and put the components into a vector
 // i.e. "C:\Users\Yuzu\Documents\save.bin" becomes {"C:", "Users", "Yuzu", "Documents", "save.bin" }
-std::vector<std::string> SplitPathComponents(std::string_view filename);
+[[nodiscard]] std::vector<std::string> SplitPathComponents(std::string_view filename);
 
 // Gets all of the text up to the last '/' or '\' in the path.
-std::string_view GetParentPath(std::string_view path);
+[[nodiscard]] std::string_view GetParentPath(std::string_view path);
 
 // Gets all of the text after the first '/' or '\' in the path.
-std::string_view GetPathWithoutTop(std::string_view path);
+[[nodiscard]] std::string_view GetPathWithoutTop(std::string_view path);
 
 // Gets the filename of the path
-std::string_view GetFilename(std::string_view path);
+[[nodiscard]] std::string_view GetFilename(std::string_view path);
 
 // Gets the extension of the filename
-std::string_view GetExtensionFromFilename(std::string_view name);
+[[nodiscard]] std::string_view GetExtensionFromFilename(std::string_view name);
 
 // Removes the final '/' or '\' if one exists
-std::string_view RemoveTrailingSlash(std::string_view path);
+[[nodiscard]] std::string_view RemoveTrailingSlash(std::string_view path);
 
 // Creates a new vector containing indices [first, last) from the original.
 template <typename T>
-std::vector<T> SliceVector(const std::vector<T>& vector, std::size_t first, std::size_t last) {
-    if (first >= last)
+[[nodiscard]] std::vector<T> SliceVector(const std::vector<T>& vector, std::size_t first,
+                                         std::size_t last) {
+    if (first >= last) {
         return {};
+    }
     last = std::min<std::size_t>(last, vector.size());
     return std::vector<T>(vector.begin() + first, vector.begin() + first + last);
 }
 
-enum class DirectorySeparator { ForwardSlash, BackwardSlash, PlatformDefault };
+enum class DirectorySeparator {
+    ForwardSlash,
+    BackwardSlash,
+    PlatformDefault,
+};
 
 // Removes trailing slash, makes all '\\' into '/', and removes duplicate '/'. Makes '/' into '\\'
 // depending if directory_separator is BackwardSlash or PlatformDefault and running on windows
-std::string SanitizePath(std::string_view path,
-                         DirectorySeparator directory_separator = DirectorySeparator::ForwardSlash);
+[[nodiscard]] std::string SanitizePath(
+    std::string_view path,
+    DirectorySeparator directory_separator = DirectorySeparator::ForwardSlash);
+
+// To deal with Windows being dumb at Unicode
+template <typename T>
+void OpenFStream(T& fstream, const std::string& filename, std::ios_base::openmode openmode) {
+#ifdef _MSC_VER
+    fstream.open(Common::UTF8ToUTF16W(filename), openmode);
+#else
+    fstream.open(filename, openmode);
+#endif
+}
 
 // simple wrapper for cstdlib file functions to
 // hopefully will make error checking easier
@@ -222,22 +240,15 @@ public:
         static_assert(std::is_trivially_copyable_v<T>,
                       "Given array does not consist of trivially copyable objects");
 
-        if (!IsOpen()) {
-            return std::numeric_limits<std::size_t>::max();
-        }
-
-        return std::fread(data, sizeof(T), length, m_file);
+        return ReadImpl(data, length, sizeof(T));
     }
 
     template <typename T>
     std::size_t WriteArray(const T* data, std::size_t length) {
         static_assert(std::is_trivially_copyable_v<T>,
                       "Given array does not consist of trivially copyable objects");
-        if (!IsOpen()) {
-            return std::numeric_limits<std::size_t>::max();
-        }
 
-        return std::fwrite(data, sizeof(T), length, m_file);
+        return WriteImpl(data, length, sizeof(T));
     }
 
     template <typename T>
@@ -262,13 +273,13 @@ public:
         return WriteArray(str.data(), str.length());
     }
 
-    bool IsOpen() const {
+    [[nodiscard]] bool IsOpen() const {
         return nullptr != m_file;
     }
 
     bool Seek(s64 off, int origin) const;
-    u64 Tell() const;
-    u64 GetSize() const;
+    [[nodiscard]] u64 Tell() const;
+    [[nodiscard]] u64 GetSize() const;
     bool Resize(u64 size);
     bool Flush();
 
@@ -278,17 +289,10 @@ public:
     }
 
 private:
+    std::size_t ReadImpl(void* data, std::size_t length, std::size_t data_size) const;
+    std::size_t WriteImpl(const void* data, std::size_t length, std::size_t data_size);
+
     std::FILE* m_file = nullptr;
 };
 
-} // namespace FileUtil
-
-// To deal with Windows being dumb at unicode:
-template <typename T>
-void OpenFStream(T& fstream, const std::string& filename, std::ios_base::openmode openmode) {
-#ifdef _MSC_VER
-    fstream.open(Common::UTF8ToUTF16W(filename), openmode);
-#else
-    fstream.open(filename, openmode);
-#endif
-}
+} // namespace Common::FS

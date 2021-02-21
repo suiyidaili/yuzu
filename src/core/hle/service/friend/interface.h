@@ -10,7 +10,7 @@ namespace Service::Friend {
 
 class Friend final : public Module::Interface {
 public:
-    explicit Friend(std::shared_ptr<Module> module, const char* name);
+    explicit Friend(std::shared_ptr<Module> module_, Core::System& system_, const char* name);
     ~Friend() override;
 };
 

@@ -1,4 +1,4 @@
-// Copyright 2016 Citra Emulator Project
+// Copyright 2019 yuzu emulator team
 // Licensed under GPLv2 or any later version
 // Refer to the license.txt file included.
 
@@ -6,20 +6,32 @@
 
 #include <memory>
 #include <string>
-#include "core/hle/kernel/object.h"
+
+#include "core/hle/kernel/k_synchronization_object.h"
+#include "core/hle/result.h"
 
 union ResultCode;
+
+namespace Core::Memory {
+class Memory;
+}
+
+namespace Core::Timing {
+class CoreTiming;
+}
 
 namespace Kernel {
 
 class KernelCore;
 class Session;
-class ServerSession;
-class Thread;
+class KThread;
 
-class ClientSession final : public Object {
+class ClientSession final : public KSynchronizationObject {
 public:
-    friend class ServerSession;
+    explicit ClientSession(KernelCore& kernel);
+    ~ClientSession() override;
+
+    friend class Session;
 
     std::string GetTypeName() const override {
         return "ClientSession";
@@ -34,11 +46,17 @@ public:
         return HANDLE_TYPE;
     }
 
-    ResultCode SendSyncRequest(SharedPtr<Thread> thread);
+    ResultCode SendSyncRequest(std::shared_ptr<KThread> thread, Core::Memory::Memory& memory,
+                               Core::Timing::CoreTiming& core_timing);
+
+    bool IsSignaled() const override;
+
+    void Finalize() override {}
 
 private:
-    explicit ClientSession(KernelCore& kernel);
-    ~ClientSession() override;
+    static ResultVal<std::shared_ptr<ClientSession>> Create(KernelCore& kernel,
+                                                            std::shared_ptr<Session> parent,
+                                                            std::string name = "Unknown");
 
     /// The parent session, which links to the server endpoint.
     std::shared_ptr<Session> parent;

@@ -14,8 +14,8 @@ namespace Layout {
 template <class T>
 static Common::Rectangle<T> MaxRectangle(Common::Rectangle<T> window_area,
                                          float screen_aspect_ratio) {
-    float scale = std::min(static_cast<float>(window_area.GetWidth()),
-                           window_area.GetHeight() / screen_aspect_ratio);
+    const float scale = std::min(static_cast<float>(window_area.GetWidth()),
+                                 static_cast<float>(window_area.GetHeight()) / screen_aspect_ratio);
     return Common::Rectangle<T>{0, 0, static_cast<T>(std::round(scale)),
                                 static_cast<T>(std::round(scale * screen_aspect_ratio))};
 }
@@ -25,11 +25,11 @@ FramebufferLayout DefaultFrameLayout(u32 width, u32 height) {
     ASSERT(height > 0);
     // The drawing code needs at least somewhat valid values for both screens
     // so just calculate them both even if the other isn't showing.
-    FramebufferLayout res{width, height};
+    FramebufferLayout res{width, height, false, {}};
 
-    const float emulation_aspect_ratio{static_cast<float>(ScreenUndocked::Height) /
-                                       ScreenUndocked::Width};
-    const auto window_aspect_ratio = static_cast<float>(height) / width;
+    const float window_aspect_ratio = static_cast<float>(height) / static_cast<float>(width);
+    const float emulation_aspect_ratio = EmulationAspectRatio(
+        static_cast<AspectRatio>(Settings::values.aspect_ratio.GetValue()), window_aspect_ratio);
 
     const Common::Rectangle<u32> screen_window_area{0, 0, width, height};
     Common::Rectangle<u32> screen = MaxRectangle(screen_window_area, emulation_aspect_ratio);
@@ -47,15 +47,30 @@ FramebufferLayout DefaultFrameLayout(u32 width, u32 height) {
 FramebufferLayout FrameLayoutFromResolutionScale(u32 res_scale) {
     u32 width, height;
 
-    if (Settings::values.use_docked_mode) {
-        width = ScreenDocked::WidthDocked * res_scale;
-        height = ScreenDocked::HeightDocked * res_scale;
+    if (Settings::values.use_docked_mode.GetValue()) {
+        width = ScreenDocked::Width * res_scale;
+        height = ScreenDocked::Height * res_scale;
     } else {
         width = ScreenUndocked::Width * res_scale;
         height = ScreenUndocked::Height * res_scale;
     }
 
     return DefaultFrameLayout(width, height);
+}
+
+float EmulationAspectRatio(AspectRatio aspect, float window_aspect_ratio) {
+    switch (aspect) {
+    case AspectRatio::Default:
+        return static_cast<float>(ScreenUndocked::Height) / ScreenUndocked::Width;
+    case AspectRatio::R4_3:
+        return 3.0f / 4.0f;
+    case AspectRatio::R21_9:
+        return 9.0f / 21.0f;
+    case AspectRatio::StretchToWindow:
+        return window_aspect_ratio;
+    default:
+        return static_cast<float>(ScreenUndocked::Height) / ScreenUndocked::Width;
+    }
 }
 
 } // namespace Layout

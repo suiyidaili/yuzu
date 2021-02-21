@@ -34,9 +34,9 @@ void GetFirmwareVersionImpl(Kernel::HLERequestContext& ctx, GetFirmwareVersionTy
     // consistence (currently reports as 5.1.0-0.0)
     const auto archive = FileSys::SystemArchive::SystemVersion();
 
-    const auto early_exit_failure = [&ctx](const std::string& desc, ResultCode code) {
+    const auto early_exit_failure = [&ctx](std::string_view desc, ResultCode code) {
         LOG_ERROR(Service_SET, "General failure while attempting to resolve firmware version ({}).",
-                  desc.c_str());
+                  desc);
         IPC::ResponseBuilder rb{ctx, 2};
         rb.Push(code);
     };
@@ -103,7 +103,7 @@ void SET_SYS::SetColorSetId(Kernel::HLERequestContext& ctx) {
     rb.Push(RESULT_SUCCESS);
 }
 
-SET_SYS::SET_SYS() : ServiceFramework("set:sys") {
+SET_SYS::SET_SYS(Core::System& system_) : ServiceFramework{system_, "set:sys"} {
     // clang-format off
     static const FunctionInfo functions[] = {
         {0, nullptr, "SetLanguageCode"},
@@ -273,10 +273,35 @@ SET_SYS::SET_SYS() : ServiceFramework("set:sys") {
         {171, nullptr, "SetChineseTraditionalInputMethod"},
         {172, nullptr, "GetPtmCycleCountReliability"},
         {173, nullptr, "SetPtmCycleCountReliability"},
+        {174, nullptr, "GetHomeMenuScheme"},
         {175, nullptr, "GetThemeSettings"},
         {176, nullptr, "SetThemeSettings"},
         {177, nullptr, "GetThemeKey"},
         {178, nullptr, "SetThemeKey"},
+        {179, nullptr, "GetZoomFlag"},
+        {180, nullptr, "SetZoomFlag"},
+        {181, nullptr, "GetT"},
+        {182, nullptr, "SetT"},
+        {183, nullptr, "GetPlatformRegion"},
+        {184, nullptr, "SetPlatformRegion"},
+        {185, nullptr, "GetHomeMenuSchemeModel"},
+        {186, nullptr, "GetMemoryUsageRateFlag"},
+        {187, nullptr, "GetTouchScreenMode"},
+        {188, nullptr, "SetTouchScreenMode"},
+        {189, nullptr, "GetButtonConfigSettingsFull"},
+        {190, nullptr, "SetButtonConfigSettingsFull"},
+        {191, nullptr, "GetButtonConfigSettingsEmbedded"},
+        {192, nullptr, "SetButtonConfigSettingsEmbedded"},
+        {193, nullptr, "GetButtonConfigSettingsLeft"},
+        {194, nullptr, "SetButtonConfigSettingsLeft"},
+        {195, nullptr, "GetButtonConfigSettingsRight"},
+        {196, nullptr, "SetButtonConfigSettingsRight"},
+        {197, nullptr, "GetButtonConfigRegisteredSettingsEmbedded"},
+        {198, nullptr, "SetButtonConfigRegisteredSettingsEmbedded"},
+        {199, nullptr, "GetButtonConfigRegisteredSettings"},
+        {200, nullptr, "SetButtonConfigRegisteredSettings"},
+        {201, nullptr, "GetFieldTestingFlag"},
+        {202, nullptr, "SetFieldTestingFlag"},
     };
     // clang-format on
 

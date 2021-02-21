@@ -11,7 +11,7 @@
 
 namespace FileSys {
 
-static bool VerifyConcatenationMapContinuity(const std::map<u64, VirtualFile>& map) {
+static bool VerifyConcatenationMapContinuity(const std::multimap<u64, VirtualFile>& map) {
     const auto last_valid = --map.end();
     for (auto iter = map.begin(); iter != last_valid;) {
         const auto old = iter++;
@@ -27,12 +27,12 @@ ConcatenatedVfsFile::ConcatenatedVfsFile(std::vector<VirtualFile> files_, std::s
     : name(std::move(name)) {
     std::size_t next_offset = 0;
     for (const auto& file : files_) {
-        files[next_offset] = file;
+        files.emplace(next_offset, file);
         next_offset += file->GetSize();
     }
 }
 
-ConcatenatedVfsFile::ConcatenatedVfsFile(std::map<u64, VirtualFile> files_, std::string name)
+ConcatenatedVfsFile::ConcatenatedVfsFile(std::multimap<u64, VirtualFile> files_, std::string name)
     : files(std::move(files_)), name(std::move(name)) {
     ASSERT(VerifyConcatenationMapContinuity(files));
 }
@@ -46,11 +46,11 @@ VirtualFile ConcatenatedVfsFile::MakeConcatenatedFile(std::vector<VirtualFile> f
     if (files.size() == 1)
         return files[0];
 
-    return std::shared_ptr<VfsFile>(new ConcatenatedVfsFile(std::move(files), std::move(name)));
+    return VirtualFile(new ConcatenatedVfsFile(std::move(files), std::move(name)));
 }
 
 VirtualFile ConcatenatedVfsFile::MakeConcatenatedFile(u8 filler_byte,
-                                                      std::map<u64, VirtualFile> files,
+                                                      std::multimap<u64, VirtualFile> files,
                                                       std::string name) {
     if (files.empty())
         return nullptr;
@@ -71,20 +71,23 @@ VirtualFile ConcatenatedVfsFile::MakeConcatenatedFile(u8 filler_byte,
     if (files.begin()->first != 0)
         files.emplace(0, std::make_shared<StaticVfsFile>(filler_byte, files.begin()->first));
 
-    return std::shared_ptr<VfsFile>(new ConcatenatedVfsFile(std::move(files), std::move(name)));
+    return VirtualFile(new ConcatenatedVfsFile(std::move(files), std::move(name)));
 }
 
 std::string ConcatenatedVfsFile::GetName() const {
-    if (files.empty())
+    if (files.empty()) {
         return "";
-    if (!name.empty())
+    }
+    if (!name.empty()) {
         return name;
+    }
     return files.begin()->second->GetName();
 }
 
 std::size_t ConcatenatedVfsFile::GetSize() const {
-    if (files.empty())
+    if (files.empty()) {
         return 0;
+    }
     return files.rbegin()->first + files.rbegin()->second->GetSize();
 }
 
@@ -92,9 +95,10 @@ bool ConcatenatedVfsFile::Resize(std::size_t new_size) {
     return false;
 }
 
-std::shared_ptr<VfsDirectory> ConcatenatedVfsFile::GetContainingDirectory() const {
-    if (files.empty())
+VirtualDir ConcatenatedVfsFile::GetContainingDirectory() const {
+    if (files.empty()) {
         return nullptr;
+    }
     return files.begin()->second->GetContainingDirectory();
 }
 

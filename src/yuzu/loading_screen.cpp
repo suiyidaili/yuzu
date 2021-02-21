@@ -19,6 +19,7 @@
 #include <QTime>
 #include <QtConcurrent/QtConcurrentRun>
 #include "common/logging/log.h"
+#include "core/frontend/framebuffer_layout.h"
 #include "core/loader/loader.h"
 #include "ui_loading_screen.h"
 #include "video_core/rasterizer_interface.h"
@@ -33,18 +34,6 @@
 constexpr char PROGRESSBAR_STYLE_PREPARE[] = R"(
 QProgressBar {}
 QProgressBar::chunk {})";
-
-constexpr char PROGRESSBAR_STYLE_DECOMPILE[] = R"(
-QProgressBar {
-  background-color: black;
-  border: 2px solid white;
-  border-radius: 4px;
-  padding: 2px;
-}
-QProgressBar::chunk {
-  background-color: #0ab9e6;
-  width: 1px;
-})";
 
 constexpr char PROGRESSBAR_STYLE_BUILD[] = R"(
 QProgressBar {
@@ -73,7 +62,7 @@ LoadingScreen::LoadingScreen(QWidget* parent)
     : QWidget(parent), ui(std::make_unique<Ui::LoadingScreen>()),
       previous_stage(VideoCore::LoadCallbackStage::Complete) {
     ui->setupUi(this);
-    setMinimumSize(1280, 720);
+    setMinimumSize(Layout::MinimumSize::Width, Layout::MinimumSize::Height);
 
     // Create a fade out effect to hide this loading screen widget.
     // When fading opacity, it will fade to the parent widgets background color, which is why we
@@ -100,13 +89,11 @@ LoadingScreen::LoadingScreen(QWidget* parent)
 
     stage_translations = {
         {VideoCore::LoadCallbackStage::Prepare, tr("Loading...")},
-        {VideoCore::LoadCallbackStage::Decompile, tr("Preparing Shaders %1 / %2")},
         {VideoCore::LoadCallbackStage::Build, tr("Loading Shaders %1 / %2")},
         {VideoCore::LoadCallbackStage::Complete, tr("Launching...")},
     };
     progressbar_style = {
         {VideoCore::LoadCallbackStage::Prepare, PROGRESSBAR_STYLE_PREPARE},
-        {VideoCore::LoadCallbackStage::Decompile, PROGRESSBAR_STYLE_DECOMPILE},
         {VideoCore::LoadCallbackStage::Build, PROGRESSBAR_STYLE_BUILD},
         {VideoCore::LoadCallbackStage::Complete, PROGRESSBAR_STYLE_COMPLETE},
     };
@@ -192,8 +179,7 @@ void LoadingScreen::OnLoadProgress(VideoCore::LoadCallbackStage stage, std::size
     }
 
     // update labels and progress bar
-    if (stage == VideoCore::LoadCallbackStage::Decompile ||
-        stage == VideoCore::LoadCallbackStage::Build) {
+    if (stage == VideoCore::LoadCallbackStage::Build) {
         ui->stage->setText(stage_translations[stage].arg(value).arg(total));
     } else {
         ui->stage->setText(stage_translations[stage]);

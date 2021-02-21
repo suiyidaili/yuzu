@@ -5,20 +5,20 @@
 #include <tuple>
 #include "common/assert.h"
 #include "core/hle/kernel/client_port.h"
-#include "core/hle/kernel/errors.h"
+#include "core/hle/kernel/k_thread.h"
 #include "core/hle/kernel/object.h"
 #include "core/hle/kernel/server_port.h"
 #include "core/hle/kernel/server_session.h"
-#include "core/hle/kernel/thread.h"
+#include "core/hle/kernel/svc_results.h"
 
 namespace Kernel {
 
-ServerPort::ServerPort(KernelCore& kernel) : WaitObject{kernel} {}
+ServerPort::ServerPort(KernelCore& kernel) : KSynchronizationObject{kernel} {}
 ServerPort::~ServerPort() = default;
 
-ResultVal<SharedPtr<ServerSession>> ServerPort::Accept() {
+ResultVal<std::shared_ptr<ServerSession>> ServerPort::Accept() {
     if (pending_sessions.empty()) {
-        return ERR_NOT_FOUND;
+        return ResultNotFound;
     }
 
     auto session = std::move(pending_sessions.back());
@@ -26,23 +26,21 @@ ResultVal<SharedPtr<ServerSession>> ServerPort::Accept() {
     return MakeResult(std::move(session));
 }
 
-void ServerPort::AppendPendingSession(SharedPtr<ServerSession> pending_session) {
+void ServerPort::AppendPendingSession(std::shared_ptr<ServerSession> pending_session) {
     pending_sessions.push_back(std::move(pending_session));
+    if (pending_sessions.size() == 1) {
+        NotifyAvailable();
+    }
 }
 
-bool ServerPort::ShouldWait(const Thread* thread) const {
-    // If there are no pending sessions, we wait until a new one is added.
-    return pending_sessions.empty();
-}
-
-void ServerPort::Acquire(Thread* thread) {
-    ASSERT_MSG(!ShouldWait(thread), "object unavailable!");
+bool ServerPort::IsSignaled() const {
+    return !pending_sessions.empty();
 }
 
 ServerPort::PortPair ServerPort::CreatePortPair(KernelCore& kernel, u32 max_sessions,
                                                 std::string name) {
-    SharedPtr<ServerPort> server_port(new ServerPort(kernel));
-    SharedPtr<ClientPort> client_port(new ClientPort(kernel));
+    std::shared_ptr<ServerPort> server_port = std::make_shared<ServerPort>(kernel);
+    std::shared_ptr<ClientPort> client_port = std::make_shared<ClientPort>(kernel);
 
     server_port->name = name + "_Server";
     client_port->name = name + "_Client";

@@ -15,7 +15,7 @@ namespace FileSys {
 // read-only.
 class ConcatenatedVfsFile : public VfsFile {
     ConcatenatedVfsFile(std::vector<VirtualFile> files, std::string name);
-    ConcatenatedVfsFile(std::map<u64, VirtualFile> files, std::string name);
+    ConcatenatedVfsFile(std::multimap<u64, VirtualFile> files, std::string name);
 
 public:
     ~ConcatenatedVfsFile() override;
@@ -25,13 +25,13 @@ public:
 
     /// Convenience function that turns a map of offsets to files into a concatenated file, filling
     /// gaps with a given filler byte.
-    static VirtualFile MakeConcatenatedFile(u8 filler_byte, std::map<u64, VirtualFile> files,
+    static VirtualFile MakeConcatenatedFile(u8 filler_byte, std::multimap<u64, VirtualFile> files,
                                             std::string name);
 
     std::string GetName() const override;
     std::size_t GetSize() const override;
     bool Resize(std::size_t new_size) override;
-    std::shared_ptr<VfsDirectory> GetContainingDirectory() const override;
+    VirtualDir GetContainingDirectory() const override;
     bool IsWritable() const override;
     bool IsReadable() const override;
     std::size_t Read(u8* data, std::size_t length, std::size_t offset) const override;
@@ -40,7 +40,7 @@ public:
 
 private:
     // Maps starting offset to file -- more efficient.
-    std::map<u64, VirtualFile> files;
+    std::multimap<u64, VirtualFile> files;
     std::string name;
 };
 

@@ -11,115 +11,120 @@
 #include "common/logging/log.h"
 #include "core/core.h"
 #include "core/frontend/framebuffer_layout.h"
-#include "video_core/renderer_vulkan/declarations.h"
-#include "video_core/renderer_vulkan/vk_device.h"
-#include "video_core/renderer_vulkan/vk_resource_manager.h"
+#include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_swapchain.h"
+#include "video_core/vulkan_common/vulkan_device.h"
+#include "video_core/vulkan_common/vulkan_wrapper.h"
 
 namespace Vulkan {
 
 namespace {
-vk::SurfaceFormatKHR ChooseSwapSurfaceFormat(const std::vector<vk::SurfaceFormatKHR>& formats) {
-    if (formats.size() == 1 && formats[0].format == vk::Format::eUndefined) {
-        return {vk::Format::eB8G8R8A8Unorm, vk::ColorSpaceKHR::eSrgbNonlinear};
+
+VkSurfaceFormatKHR ChooseSwapSurfaceFormat(vk::Span<VkSurfaceFormatKHR> formats, bool srgb) {
+    if (formats.size() == 1 && formats[0].format == VK_FORMAT_UNDEFINED) {
+        VkSurfaceFormatKHR format;
+        format.format = VK_FORMAT_B8G8R8A8_UNORM;
+        format.colorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+        return format;
     }
-    const auto& found = std::find_if(formats.begin(), formats.end(), [](const auto& format) {
-        return format.format == vk::Format::eB8G8R8A8Unorm &&
-               format.colorSpace == vk::ColorSpaceKHR::eSrgbNonlinear;
+    const auto& found = std::find_if(formats.begin(), formats.end(), [srgb](const auto& format) {
+        const auto request_format = srgb ? VK_FORMAT_B8G8R8A8_SRGB : VK_FORMAT_B8G8R8A8_UNORM;
+        return format.format == request_format &&
+               format.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
     });
     return found != formats.end() ? *found : formats[0];
 }
 
-vk::PresentModeKHR ChooseSwapPresentMode(const std::vector<vk::PresentModeKHR>& modes) {
+VkPresentModeKHR ChooseSwapPresentMode(vk::Span<VkPresentModeKHR> modes) {
     // Mailbox doesn't lock the application like fifo (vsync), prefer it
-    const auto& found = std::find_if(modes.begin(), modes.end(), [](const auto& mode) {
-        return mode == vk::PresentModeKHR::eMailbox;
-    });
-    return found != modes.end() ? *found : vk::PresentModeKHR::eFifo;
+    const auto found = std::find(modes.begin(), modes.end(), VK_PRESENT_MODE_MAILBOX_KHR);
+    return found != modes.end() ? *found : VK_PRESENT_MODE_FIFO_KHR;
 }
 
-vk::Extent2D ChooseSwapExtent(const vk::SurfaceCapabilitiesKHR& capabilities, u32 width,
-                              u32 height) {
+VkExtent2D ChooseSwapExtent(const VkSurfaceCapabilitiesKHR& capabilities, u32 width, u32 height) {
     constexpr auto undefined_size{std::numeric_limits<u32>::max()};
     if (capabilities.currentExtent.width != undefined_size) {
         return capabilities.currentExtent;
     }
-    vk::Extent2D extent = {width, height};
+    VkExtent2D extent;
     extent.width = std::max(capabilities.minImageExtent.width,
-                            std::min(capabilities.maxImageExtent.width, extent.width));
+                            std::min(capabilities.maxImageExtent.width, width));
     extent.height = std::max(capabilities.minImageExtent.height,
-                             std::min(capabilities.maxImageExtent.height, extent.height));
+                             std::min(capabilities.maxImageExtent.height, height));
     return extent;
 }
-} // namespace
 
-VKSwapchain::VKSwapchain(vk::SurfaceKHR surface, const VKDevice& device)
-    : surface{surface}, device{device} {}
+} // Anonymous namespace
+
+VKSwapchain::VKSwapchain(VkSurfaceKHR surface_, const Device& device_, VKScheduler& scheduler_,
+                         u32 width, u32 height, bool srgb)
+    : surface{surface_}, device{device_}, scheduler{scheduler_} {
+    Create(width, height, srgb);
+}
 
 VKSwapchain::~VKSwapchain() = default;
 
-void VKSwapchain::Create(u32 width, u32 height) {
-    const auto dev = device.GetLogical();
-    const auto& dld = device.GetDispatchLoader();
+void VKSwapchain::Create(u32 width, u32 height, bool srgb) {
     const auto physical_device = device.GetPhysical();
-
-    const vk::SurfaceCapabilitiesKHR capabilities{
-        physical_device.getSurfaceCapabilitiesKHR(surface, dld)};
+    const auto capabilities{physical_device.GetSurfaceCapabilitiesKHR(surface)};
     if (capabilities.maxImageExtent.width == 0 || capabilities.maxImageExtent.height == 0) {
         return;
     }
 
-    dev.waitIdle(dld);
+    device.GetLogical().WaitIdle();
     Destroy();
 
-    CreateSwapchain(capabilities, width, height);
+    CreateSwapchain(capabilities, width, height, srgb);
     CreateSemaphores();
     CreateImageViews();
 
-    fences.resize(image_count, nullptr);
+    resource_ticks.clear();
+    resource_ticks.resize(image_count);
 }
 
 void VKSwapchain::AcquireNextImage() {
-    const auto dev{device.GetLogical()};
-    const auto& dld{device.GetDispatchLoader()};
-    dev.acquireNextImageKHR(*swapchain, std::numeric_limits<u64>::max(),
-                            *present_semaphores[frame_index], {}, &image_index, dld);
+    device.GetLogical().AcquireNextImageKHR(*swapchain, std::numeric_limits<u64>::max(),
+                                            *present_semaphores[frame_index], {}, &image_index);
 
-    if (auto& fence = fences[image_index]; fence) {
-        fence->Wait();
-        fence->Release();
-        fence = nullptr;
-    }
+    scheduler.Wait(resource_ticks[image_index]);
 }
 
-bool VKSwapchain::Present(vk::Semaphore render_semaphore, VKFence& fence) {
-    const vk::Semaphore present_semaphore{*present_semaphores[frame_index]};
-    const std::array<vk::Semaphore, 2> semaphores{present_semaphore, render_semaphore};
-    const u32 wait_semaphore_count{render_semaphore ? 2U : 1U};
-    const auto& dld{device.GetDispatchLoader()};
+bool VKSwapchain::Present(VkSemaphore render_semaphore) {
+    const VkSemaphore present_semaphore{*present_semaphores[frame_index]};
+    const std::array<VkSemaphore, 2> semaphores{present_semaphore, render_semaphore};
     const auto present_queue{device.GetPresentQueue()};
     bool recreated = false;
 
-    const vk::PresentInfoKHR present_info(wait_semaphore_count, semaphores.data(), 1,
-                                          &swapchain.get(), &image_index, {});
-    switch (const auto result = present_queue.presentKHR(&present_info, dld); result) {
-    case vk::Result::eSuccess:
+    const VkPresentInfoKHR present_info{
+        .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+        .pNext = nullptr,
+        .waitSemaphoreCount = render_semaphore ? 2U : 1U,
+        .pWaitSemaphores = semaphores.data(),
+        .swapchainCount = 1,
+        .pSwapchains = swapchain.address(),
+        .pImageIndices = &image_index,
+        .pResults = nullptr,
+    };
+
+    switch (const VkResult result = present_queue.Present(present_info)) {
+    case VK_SUCCESS:
         break;
-    case vk::Result::eErrorOutOfDateKHR:
+    case VK_SUBOPTIMAL_KHR:
+        LOG_DEBUG(Render_Vulkan, "Suboptimal swapchain");
+        break;
+    case VK_ERROR_OUT_OF_DATE_KHR:
         if (current_width > 0 && current_height > 0) {
-            Create(current_width, current_height);
+            Create(current_width, current_height, current_srgb);
             recreated = true;
         }
         break;
     default:
-        LOG_CRITICAL(Render_Vulkan, "Vulkan failed to present swapchain due to {}!",
-                     vk::to_string(result));
-        UNREACHABLE();
+        LOG_CRITICAL(Render_Vulkan, "Failed to present with error {}", vk::ToString(result));
+        break;
     }
 
-    ASSERT(fences[image_index] == nullptr);
-    fences[image_index] = &fence;
-    frame_index = (frame_index + 1) % image_count;
+    resource_ticks[image_index] = scheduler.CurrentTick();
+    frame_index = (frame_index + 1) % static_cast<u32>(image_count);
     return recreated;
 }
 
@@ -128,74 +133,101 @@ bool VKSwapchain::HasFramebufferChanged(const Layout::FramebufferLayout& framebu
     return framebuffer.width != current_width || framebuffer.height != current_height;
 }
 
-void VKSwapchain::CreateSwapchain(const vk::SurfaceCapabilitiesKHR& capabilities, u32 width,
-                                  u32 height) {
-    const auto dev{device.GetLogical()};
-    const auto& dld{device.GetDispatchLoader()};
+void VKSwapchain::CreateSwapchain(const VkSurfaceCapabilitiesKHR& capabilities, u32 width,
+                                  u32 height, bool srgb) {
     const auto physical_device{device.GetPhysical()};
+    const auto formats{physical_device.GetSurfaceFormatsKHR(surface)};
+    const auto present_modes{physical_device.GetSurfacePresentModesKHR(surface)};
 
-    const std::vector<vk::SurfaceFormatKHR> formats{
-        physical_device.getSurfaceFormatsKHR(surface, dld)};
-
-    const std::vector<vk::PresentModeKHR> present_modes{
-        physical_device.getSurfacePresentModesKHR(surface, dld)};
-
-    const vk::SurfaceFormatKHR surface_format{ChooseSwapSurfaceFormat(formats)};
-    const vk::PresentModeKHR present_mode{ChooseSwapPresentMode(present_modes)};
-    extent = ChooseSwapExtent(capabilities, width, height);
-
-    current_width = extent.width;
-    current_height = extent.height;
+    const VkSurfaceFormatKHR surface_format{ChooseSwapSurfaceFormat(formats, srgb)};
+    const VkPresentModeKHR present_mode{ChooseSwapPresentMode(present_modes)};
 
     u32 requested_image_count{capabilities.minImageCount + 1};
     if (capabilities.maxImageCount > 0 && requested_image_count > capabilities.maxImageCount) {
         requested_image_count = capabilities.maxImageCount;
     }
 
-    vk::SwapchainCreateInfoKHR swapchain_ci(
-        {}, surface, requested_image_count, surface_format.format, surface_format.colorSpace,
-        extent, 1, vk::ImageUsageFlagBits::eColorAttachment, {}, {}, {},
-        capabilities.currentTransform, vk::CompositeAlphaFlagBitsKHR::eOpaque, present_mode, false,
-        {});
+    VkSwapchainCreateInfoKHR swapchain_ci{
+        .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
+        .pNext = nullptr,
+        .flags = 0,
+        .surface = surface,
+        .minImageCount = requested_image_count,
+        .imageFormat = surface_format.format,
+        .imageColorSpace = surface_format.colorSpace,
+        .imageExtent = {},
+        .imageArrayLayers = 1,
+        .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+        .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .queueFamilyIndexCount = 0,
+        .pQueueFamilyIndices = nullptr,
+        .preTransform = capabilities.currentTransform,
+        .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+        .presentMode = present_mode,
+        .clipped = VK_FALSE,
+        .oldSwapchain = nullptr,
+    };
 
     const u32 graphics_family{device.GetGraphicsFamily()};
     const u32 present_family{device.GetPresentFamily()};
     const std::array<u32, 2> queue_indices{graphics_family, present_family};
     if (graphics_family != present_family) {
-        swapchain_ci.imageSharingMode = vk::SharingMode::eConcurrent;
+        swapchain_ci.imageSharingMode = VK_SHARING_MODE_CONCURRENT;
         swapchain_ci.queueFamilyIndexCount = static_cast<u32>(queue_indices.size());
         swapchain_ci.pQueueFamilyIndices = queue_indices.data();
-    } else {
-        swapchain_ci.imageSharingMode = vk::SharingMode::eExclusive;
     }
 
-    swapchain = dev.createSwapchainKHRUnique(swapchain_ci, nullptr, dld);
+    // Request the size again to reduce the possibility of a TOCTOU race condition.
+    const auto updated_capabilities = physical_device.GetSurfaceCapabilitiesKHR(surface);
+    swapchain_ci.imageExtent = ChooseSwapExtent(updated_capabilities, width, height);
+    // Don't add code within this and the swapchain creation.
+    swapchain = device.GetLogical().CreateSwapchainKHR(swapchain_ci);
 
-    images = dev.getSwapchainImagesKHR(*swapchain, dld);
+    extent = swapchain_ci.imageExtent;
+    current_width = extent.width;
+    current_height = extent.height;
+    current_srgb = srgb;
+
+    images = swapchain.GetImages();
     image_count = static_cast<u32>(images.size());
     image_format = surface_format.format;
 }
 
 void VKSwapchain::CreateSemaphores() {
-    const auto dev{device.GetLogical()};
-    const auto& dld{device.GetDispatchLoader()};
-
     present_semaphores.resize(image_count);
-    for (std::size_t i = 0; i < image_count; i++) {
-        present_semaphores[i] = dev.createSemaphoreUnique({}, nullptr, dld);
-    }
+    std::generate(present_semaphores.begin(), present_semaphores.end(),
+                  [this] { return device.GetLogical().CreateSemaphore(); });
 }
 
 void VKSwapchain::CreateImageViews() {
-    const auto dev{device.GetLogical()};
-    const auto& dld{device.GetDispatchLoader()};
+    VkImageViewCreateInfo ci{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = 0,
+        .image = {},
+        .viewType = VK_IMAGE_VIEW_TYPE_2D,
+        .format = image_format,
+        .components =
+            {
+                .r = VK_COMPONENT_SWIZZLE_IDENTITY,
+                .g = VK_COMPONENT_SWIZZLE_IDENTITY,
+                .b = VK_COMPONENT_SWIZZLE_IDENTITY,
+                .a = VK_COMPONENT_SWIZZLE_IDENTITY,
+            },
+        .subresourceRange =
+            {
+                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+    };
 
     image_views.resize(image_count);
     for (std::size_t i = 0; i < image_count; i++) {
-        const vk::ImageViewCreateInfo image_view_ci({}, images[i], vk::ImageViewType::e2D,
-                                                    image_format, {},
-                                                    {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1});
-        image_views[i] = dev.createImageViewUnique(image_view_ci, nullptr, dld);
+        ci.image = images[i];
+        image_views[i] = device.GetLogical().CreateImageView(ci);
     }
 }
 

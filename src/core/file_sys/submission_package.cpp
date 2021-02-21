@@ -14,46 +14,15 @@
 #include "core/file_sys/content_archive.h"
 #include "core/file_sys/nca_metadata.h"
 #include "core/file_sys/partition_filesystem.h"
+#include "core/file_sys/program_metadata.h"
 #include "core/file_sys/submission_package.h"
 #include "core/loader/loader.h"
 
 namespace FileSys {
-namespace {
-void SetTicketKeys(const std::vector<VirtualFile>& files) {
-    Core::Crypto::KeyManager keys;
 
-    for (const auto& ticket_file : files) {
-        if (ticket_file == nullptr) {
-            continue;
-        }
-
-        if (ticket_file->GetExtension() != "tik") {
-            continue;
-        }
-
-        if (ticket_file->GetSize() <
-            Core::Crypto::TICKET_FILE_TITLEKEY_OFFSET + sizeof(Core::Crypto::Key128)) {
-            continue;
-        }
-
-        Core::Crypto::Key128 key{};
-        ticket_file->Read(key.data(), key.size(), Core::Crypto::TICKET_FILE_TITLEKEY_OFFSET);
-
-        // We get the name without the extension in order to create the rights ID.
-        std::string name_only(ticket_file->GetName());
-        name_only.erase(name_only.size() - 4);
-
-        const auto rights_id_raw = Common::HexStringToArray<16>(name_only);
-        u128 rights_id;
-        std::memcpy(rights_id.data(), rights_id_raw.data(), sizeof(u128));
-        keys.SetKey(Core::Crypto::S128KeyType::Titlekey, key, rights_id[1], rights_id[0]);
-    }
-}
-} // Anonymous namespace
-
-NSP::NSP(VirtualFile file_)
-    : file(std::move(file_)), status{Loader::ResultStatus::Success},
-      pfs(std::make_shared<PartitionFilesystem>(file)) {
+NSP::NSP(VirtualFile file_, std::size_t program_index)
+    : file(std::move(file_)), program_index(program_index), status{Loader::ResultStatus::Success},
+      pfs(std::make_shared<PartitionFilesystem>(file)), keys{Core::Crypto::KeyManager::Instance()} {
     if (pfs->GetStatus() != Loader::ResultStatus::Success) {
         status = pfs->GetStatus();
         return;
@@ -78,6 +47,10 @@ Loader::ResultStatus NSP::GetStatus() const {
 }
 
 Loader::ResultStatus NSP::GetProgramStatus(u64 title_id) const {
+    if (IsExtractedType() && GetExeFS() != nullptr && FileSys::IsDirectoryExeFS(GetExeFS())) {
+        return Loader::ResultStatus::Success;
+    }
+
     const auto iter = program_status.find(title_id);
     if (iter == program_status.end())
         return Loader::ResultStatus::ErrorNSPMissingProgramNCA;
@@ -85,12 +58,29 @@ Loader::ResultStatus NSP::GetProgramStatus(u64 title_id) const {
 }
 
 u64 NSP::GetFirstTitleID() const {
+    if (IsExtractedType()) {
+        return GetProgramTitleID();
+    }
+
     if (program_status.empty())
         return 0;
     return program_status.begin()->first;
 }
 
 u64 NSP::GetProgramTitleID() const {
+    if (IsExtractedType()) {
+        if (GetExeFS() == nullptr || !IsDirectoryExeFS(GetExeFS())) {
+            return 0;
+        }
+
+        ProgramMetadata meta;
+        if (meta.Load(GetExeFS()->GetFile("main.npdm")) == Loader::ResultStatus::Success) {
+            return meta.GetTitleID();
+        } else {
+            return 0;
+        }
+    }
+
     const auto out = GetFirstTitleID();
     if ((out & 0x800) == 0)
         return out;
@@ -102,6 +92,10 @@ u64 NSP::GetProgramTitleID() const {
 }
 
 std::vector<u64> NSP::GetTitleIDs() const {
+    if (IsExtractedType()) {
+        return {GetProgramTitleID()};
+    }
+
     std::vector<u64> out;
     out.reserve(ncas.size());
     for (const auto& kv : ncas)
@@ -152,7 +146,7 @@ std::shared_ptr<NCA> NSP::GetNCA(u64 title_id, ContentRecordType type, TitleType
     if (extracted)
         LOG_WARNING(Service_FS, "called on an NSP that is of type extracted.");
 
-    const auto title_id_iter = ncas.find(title_id);
+    const auto title_id_iter = ncas.find(title_id + program_index);
     if (title_id_iter == ncas.end())
         return nullptr;
 
@@ -206,6 +200,35 @@ VirtualDir NSP::GetParentDirectory() const {
     return file->GetContainingDirectory();
 }
 
+void NSP::SetTicketKeys(const std::vector<VirtualFile>& files) {
+    for (const auto& ticket_file : files) {
+        if (ticket_file == nullptr) {
+            continue;
+        }
+
+        if (ticket_file->GetExtension() != "tik") {
+            continue;
+        }
+
+        if (ticket_file->GetSize() <
+            Core::Crypto::TICKET_FILE_TITLEKEY_OFFSET + sizeof(Core::Crypto::Key128)) {
+            continue;
+        }
+
+        Core::Crypto::Key128 key{};
+        ticket_file->Read(key.data(), key.size(), Core::Crypto::TICKET_FILE_TITLEKEY_OFFSET);
+
+        // We get the name without the extension in order to create the rights ID.
+        std::string name_only(ticket_file->GetName());
+        name_only.erase(name_only.size() - 4);
+
+        const auto rights_id_raw = Common::HexStringToArray<16>(name_only);
+        u128 rights_id;
+        std::memcpy(rights_id.data(), rights_id_raw.data(), sizeof(u128));
+        keys.SetKey(Core::Crypto::S128KeyType::Titlekey, key, rights_id[1], rights_id[0]);
+    }
+}
+
 void NSP::InitializeExeFSAndRomFS(const std::vector<VirtualFile>& files) {
     exefs = pfs;
 
@@ -222,7 +245,8 @@ void NSP::InitializeExeFSAndRomFS(const std::vector<VirtualFile>& files) {
 
 void NSP::ReadNCAs(const std::vector<VirtualFile>& files) {
     for (const auto& outer_file : files) {
-        if (outer_file->GetName().substr(outer_file->GetName().size() - 9) != ".cnmt.nca") {
+        if (outer_file->GetName().size() < 9 ||
+            outer_file->GetName().substr(outer_file->GetName().size() - 9) != ".cnmt.nca") {
             continue;
         }
 
@@ -240,9 +264,9 @@ void NSP::ReadNCAs(const std::vector<VirtualFile>& files) {
             }
 
             const CNMT cnmt(inner_file);
-            auto& ncas_title = ncas[cnmt.GetTitleID()];
 
-            ncas_title[{cnmt.GetType(), ContentRecordType::Meta}] = nca;
+            ncas[cnmt.GetTitleID()][{cnmt.GetType(), ContentRecordType::Meta}] = nca;
+
             for (const auto& rec : cnmt.GetContentRecords()) {
                 const auto id_string = Common::HexToString(rec.nca_id, false);
                 auto next_file = pfs->GetFile(fmt::format("{}.nca", id_string));
@@ -258,14 +282,33 @@ void NSP::ReadNCAs(const std::vector<VirtualFile>& files) {
                     continue;
                 }
 
-                auto next_nca = std::make_shared<NCA>(std::move(next_file), nullptr, 0, keys);
+                auto next_nca = std::make_shared<NCA>(std::move(next_file), nullptr, 0);
+
                 if (next_nca->GetType() == NCAContentType::Program) {
-                    program_status[cnmt.GetTitleID()] = next_nca->GetStatus();
+                    program_status[next_nca->GetTitleId()] = next_nca->GetStatus();
                 }
-                if (next_nca->GetStatus() == Loader::ResultStatus::Success ||
-                    (next_nca->GetStatus() == Loader::ResultStatus::ErrorMissingBKTRBaseRomFS &&
-                     (cnmt.GetTitleID() & 0x800) != 0)) {
-                    ncas_title[{cnmt.GetType(), rec.type}] = std::move(next_nca);
+
+                if (next_nca->GetStatus() != Loader::ResultStatus::Success &&
+                    next_nca->GetStatus() != Loader::ResultStatus::ErrorMissingBKTRBaseRomFS) {
+                    continue;
+                }
+
+                // If the last 3 hexadecimal digits of the CNMT TitleID is 0x800 or is missing the
+                // BKTRBaseRomFS, this is an update NCA. Otherwise, this is a base NCA.
+                if ((cnmt.GetTitleID() & 0x800) != 0 ||
+                    next_nca->GetStatus() == Loader::ResultStatus::ErrorMissingBKTRBaseRomFS) {
+                    // If the last 3 hexadecimal digits of the NCA's TitleID is between 0x1 and
+                    // 0x7FF, this is a multi-program update NCA. Otherwise, this is a regular
+                    // update NCA.
+                    if ((next_nca->GetTitleId() & 0x7FF) != 0 &&
+                        (next_nca->GetTitleId() & 0x800) == 0) {
+                        ncas[next_nca->GetTitleId()][{cnmt.GetType(), rec.type}] =
+                            std::move(next_nca);
+                    } else {
+                        ncas[cnmt.GetTitleID()][{cnmt.GetType(), rec.type}] = std::move(next_nca);
+                    }
+                } else {
+                    ncas[next_nca->GetTitleId()][{cnmt.GetType(), rec.type}] = std::move(next_nca);
                 }
             }
 
